@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package config
 
 import (
@@ -55,6 +58,7 @@ func DefaultSource() Source {
 		segment_limit = 64
 
 		server = false
+		server_rejoin_age_max = "168h"
 		syslog_facility = "LOCAL0"
 
 		tls = {
@@ -114,6 +118,8 @@ func DefaultSource() Source {
 			leave_drain_time = "5s"
 			raft_multiplier = ` + strconv.Itoa(int(consul.DefaultRaftMultiplier)) + `
 			rpc_hold_timeout = "7s"
+			grpc_keepalive_interval = "30s"
+			grpc_keepalive_timeout = "20s"
 		}
 		ports = {
 			dns = 8600
@@ -140,7 +146,12 @@ func DefaultSource() Source {
 		raft_snapshot_threshold = ` + strconv.Itoa(int(cfg.RaftConfig.SnapshotThreshold)) + `
 		raft_snapshot_interval =  "` + cfg.RaftConfig.SnapshotInterval.String() + `"
 		raft_trailing_logs = ` + strconv.Itoa(int(cfg.RaftConfig.TrailingLogs)) + `
-
+		raft_prevote_disabled =  false
+		raft_logstore {
+			wal {
+				segment_size_mb = 64
+			}
+		}
 		xds {
 			update_max_per_second = 250
 		}
@@ -200,6 +211,7 @@ func DevSource() Source {
 		ports = {
 			grpc = 8502
 		}
+		experiments = []
 	`,
 	}
 }

@@ -48,6 +48,10 @@
         "path": "acl/policies"
       },
       {
+        "title": "Templated Policies",
+        "path": "acl/templated-policies"
+      },
+      {
         "title": "Roles",
         "path": "acl/roles"
       },
@@ -128,6 +132,10 @@
     "path": "event"
   },
   {
+    "title": "Exported Services",
+    "path": "exported-services"
+  },
+  {
     "title": "Health",
     "path": "health"
   },
@@ -165,6 +173,10 @@
       {
         "title": "Segment",
         "path": "operator/segment"
+      },
+      {
+        "title": "Usage",
+        "path": "operator/usage"
       }
     ]
   },

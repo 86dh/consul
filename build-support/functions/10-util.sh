@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 function err {
    if test "${COLORIZE}" -eq 1
    then
@@ -233,7 +236,7 @@ function get_version {
    local vers="$VERSION"
    if test -z "$vers"
    then
-      # parse the OSS version from version.go
+      # parse the CE version from version.go
       vers="$(parse_version ${1} ${2} ${3})"
    fi
 
@@ -634,6 +637,7 @@ function ui_logo_type {
    then
      echo "enterprise"
    else
+     # TODO(spatel): CE refactor
      echo "oss"
    fi
    return 0
@@ -662,4 +666,22 @@ function go_mod_assert {
       fi
    fi
    return 0
+}
+
+function get_consul_module_versions {
+  local module_directories
+  module_directories=( "." "api" "envoyextensions" "proto-public" "sdk" "troubleshoot")
+  for module_dir in "${module_directories[@]}"; do
+    echo "Module versions for directory: '$module_dir':"
+    echo "--------------"
+    (cd "$module_dir" && go list -m all | grep -e github.com/hashicorp/consul/api \
+    -e github.com/hashicorp/consul/envoyextensions \
+    -e github.com/hashicorp/consul/proto-public \
+    -e github.com/hashicorp/consul/sdk \
+    -e github.com/hashicorp/consul/troubleshoot \
+    | if [ "$module_dir" != "." ]; then grep -v "consul/$module_dir"; else cat; fi)
+    echo "--------------"
+    echo ""
+  done
+  return 0
 }

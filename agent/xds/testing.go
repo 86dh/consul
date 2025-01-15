@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package xds
 
 import (
@@ -12,13 +15,12 @@ import (
 	envoy_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_discovery_v3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	envoy_type_v3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/hashicorp/consul/envoyextensions/xdscommon"
 
 	"github.com/mitchellh/go-testing-interface"
-	status "google.golang.org/genproto/googleapis/rpc/status"
+	"google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-
-	"github.com/hashicorp/consul/agent/xds/proxysupport"
 )
 
 // TestADSDeltaStream mocks
@@ -86,6 +88,8 @@ type TestEnvoy struct {
 	EnvoyVersion string
 
 	deltaStream *TestADSDeltaStream // Incremental v3
+
+	closed bool
 }
 
 // NewTestEnvoy creates a TestEnvoy instance.
@@ -121,15 +125,15 @@ func stringToEnvoyVersion(vs string) (*envoy_type_v3.SemanticVersion, bool) {
 		return nil, false
 	}
 
-	major, err := strconv.Atoi(parts[0])
+	major, err := strconv.ParseUint(parts[0], 10, 32)
 	if err != nil {
 		return nil, false
 	}
-	minor, err := strconv.Atoi(parts[1])
+	minor, err := strconv.ParseUint(parts[1], 10, 32)
 	if err != nil {
 		return nil, false
 	}
-	patch, err := strconv.Atoi(parts[2])
+	patch, err := strconv.ParseUint(parts[2], 10, 32)
 	if err != nil {
 		return nil, false
 	}
@@ -186,7 +190,7 @@ func (e *TestEnvoy) sendDeltaReq(
 
 	stringVersion := e.EnvoyVersion
 	if stringVersion == "" {
-		stringVersion = proxysupport.EnvoyVersions[0]
+		stringVersion = xdscommon.EnvoyVersions[0]
 	}
 
 	ev, valid := stringToEnvoyVersion(stringVersion)
@@ -226,9 +230,9 @@ func (e *TestEnvoy) Close() error {
 	defer e.mu.Unlock()
 
 	// unblock the recv chans to simulate recv errors when client disconnects
-	if e.deltaStream != nil && e.deltaStream.recvCh != nil {
+	if !e.closed && e.deltaStream.recvCh != nil {
 		close(e.deltaStream.recvCh)
-		e.deltaStream = nil
+		e.closed = true
 	}
 	if e.cancel != nil {
 		e.cancel()

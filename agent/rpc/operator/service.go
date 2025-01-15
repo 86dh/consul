@@ -1,12 +1,16 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package operator
 
 import (
 	"context"
+
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/acl/resolver"
 	external "github.com/hashicorp/consul/agent/grpc-external"
 	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/proto/pboperator"
+	"github.com/hashicorp/consul/proto/private/pboperator"
 	"github.com/hashicorp/go-hclog"
 	"google.golang.org/grpc"
 )
@@ -90,8 +94,8 @@ func requireNotNil(v interface{}, name string) {
 
 var _ pboperator.OperatorServiceServer = (*Server)(nil)
 
-func (s *Server) Register(grpcServer *grpc.Server) {
-	pboperator.RegisterOperatorServiceServer(grpcServer, s)
+func (s *Server) Register(registrar grpc.ServiceRegistrar) {
+	pboperator.RegisterOperatorServiceServer(registrar, s)
 }
 
 // Backend defines the core integrations the Operator endpoint depends on. A

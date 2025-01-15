@@ -62,7 +62,7 @@ The docker image is pre-built with all the website dependencies installed, which
 
 ### With Node
 
-If your local development environment has a supported version (v10.0.0+) of [node installed](https://nodejs.org/en/) you can run:
+If your local development environment has a supported version (v18.17.0+) of [node installed](https://nodejs.org/en/) you can run:
 
 - `npm install`
 - `npm start`
@@ -99,6 +99,16 @@ The significant keys in the YAML frontmatter are:
 - `description` `(string)` - This is a description of the page that will be set in the HTML description.
 
 > ⚠️ If there is a need for a `/api/*` url on this website, the url will be changed to `/api-docs/*`, as the `api` folder is reserved by next.js.
+
+### Validating Content
+
+Content changes are automatically validated against a set of rules as part of the pull request process. If you want to run these checks locally to validate your content before comitting your changes, you can run the following command:
+
+```
+npm run content-check
+```
+
+If the validation fails, actionable error messages will be displayed to help you address detected issues.
 
 ### Creating New Pages
 

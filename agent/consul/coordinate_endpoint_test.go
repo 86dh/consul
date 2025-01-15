@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
@@ -9,15 +12,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/serf/coordinate"
 	"github.com/stretchr/testify/require"
 
 	msgpackrpc "github.com/hashicorp/consul-net-rpc/net-rpc-msgpackrpc"
 	"github.com/hashicorp/consul-net-rpc/net/rpc"
+	"github.com/hashicorp/serf/coordinate"
 
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/lib"
+	"github.com/hashicorp/consul/internal/gossip/librtt"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/testrpc"
 )
@@ -89,13 +92,13 @@ func TestCoordinate_Update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	require.Equal(t, lib.CoordinateSet{}, c)
+	require.Equal(t, librtt.CoordinateSet{}, c)
 
 	_, c, err = state.Coordinate(nil, "node2", nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	require.Equal(t, lib.CoordinateSet{}, c)
+	require.Equal(t, librtt.CoordinateSet{}, c)
 
 	// Send another update for the second node. It should take precedence
 	// since there will be two updates in the same batch.
@@ -110,7 +113,7 @@ func TestCoordinate_Update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	expected := lib.CoordinateSet{
+	expected := librtt.CoordinateSet{
 		"": arg1.Coord,
 	}
 	require.Equal(t, expected, c)
@@ -119,7 +122,7 @@ func TestCoordinate_Update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	expected = lib.CoordinateSet{
+	expected = librtt.CoordinateSet{
 		"": arg2.Coord,
 	}
 	require.Equal(t, expected, c)

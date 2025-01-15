@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package external
 
 import (
@@ -40,4 +43,10 @@ func RequireAnyValidACLToken(resolver ACLResolver, token string) error {
 	}
 
 	return nil
+}
+
+func RequireNotNil(v interface{}, name string) {
+	if v == nil {
+		panic(name + " is required")
+	}
 }

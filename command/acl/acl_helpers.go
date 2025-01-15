@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package acl
 
 import (
@@ -7,16 +10,19 @@ import (
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/command/helpers"
+	"github.com/hashicorp/hcl"
+	"github.com/mitchellh/mapstructure"
 )
 
-func GetTokenIDFromPartial(client *api.Client, partialID string) (string, error) {
-	if partialID == "anonymous" {
+func GetTokenAccessorIDFromPartial(client *api.Client, partialAccessorID string) (string, error) {
+	if partialAccessorID == "anonymous" {
 		return acl.AnonymousTokenID, nil
 	}
 
 	// the full UUID string was given
-	if len(partialID) == 36 {
-		return partialID, nil
+	if len(partialAccessorID) == 36 {
+		return partialAccessorID, nil
 	}
 
 	tokens, _, err := client.ACL().TokenList(nil)
@@ -24,27 +30,35 @@ func GetTokenIDFromPartial(client *api.Client, partialID string) (string, error)
 		return "", err
 	}
 
-	tokenID := ""
+	tokenAccessorID := ""
 	for _, token := range tokens {
-		if strings.HasPrefix(token.AccessorID, partialID) {
-			if tokenID != "" {
+		if strings.HasPrefix(token.AccessorID, partialAccessorID) {
+			if tokenAccessorID != "" {
 				return "", fmt.Errorf("Partial token ID is not unique")
 			}
-			tokenID = token.AccessorID
+			tokenAccessorID = token.AccessorID
 		}
 	}
 
-	if tokenID == "" {
-		return "", fmt.Errorf("No such token ID with prefix: %s", partialID)
+	if tokenAccessorID == "" {
+		return "", fmt.Errorf("No such token ID with prefix: %s", partialAccessorID)
 	}
 
-	return tokenID, nil
+	return tokenAccessorID, nil
 }
 
 func GetPolicyIDFromPartial(client *api.Client, partialID string) (string, error) {
-	if partialID == "global-management" {
-		return structs.ACLPolicyGlobalManagementID, nil
+	// try the builtin policies (by name) first
+	for _, policy := range structs.ACLBuiltinPolicies {
+		if partialID == policy.Name {
+			return policy.ID, nil
+		}
 	}
+
+	if policy, ok := structs.ACLBuiltinPolicies[partialID]; ok {
+		return policy.ID, nil
+	}
+
 	// The full UUID string was given
 	if len(partialID) == 36 {
 		return partialID, nil
@@ -89,6 +103,10 @@ func GetPolicyIDByName(client *api.Client, name string) (string, error) {
 	policy, err := GetPolicyByName(client, name)
 	if err != nil {
 		return "", err
+	}
+
+	if policy == nil {
+		return "", fmt.Errorf("No such policy with name: %s", name)
 	}
 
 	return policy.ID, nil
@@ -163,7 +181,7 @@ func GetBindingRuleIDFromPartial(client *api.Client, partialID string) (string, 
 	}
 
 	if ruleID == "" {
-		return "", fmt.Errorf("No such rule ID with prefix: %s", partialID)
+		return "", fmt.Errorf("no such rule ID with prefix: %s: %w", partialID, acl.ErrNotFound)
 	}
 
 	return ruleID, nil
@@ -205,6 +223,79 @@ func ExtractNodeIdentities(nodeIdents []string) ([]*api.ACLNodeIdentity, error) 
 		}
 	}
 	return out, nil
+}
+
+func ExtractTemplatedPolicies(templatedPolicy string, templatedPolicyFile string, templatedPolicyVariables []string) ([]*api.ACLTemplatedPolicy, error) {
+	var out []*api.ACLTemplatedPolicy
+	if templatedPolicy == "" && templatedPolicyFile == "" {
+		return out, nil
+	}
+
+	if templatedPolicy != "" {
+		parsedVariables, err := getTemplatedPolicyVariables(templatedPolicyVariables)
+		if err != nil {
+			return nil, err
+		}
+
+		out = append(out, &api.ACLTemplatedPolicy{
+			TemplateName:      templatedPolicy,
+			TemplateVariables: parsedVariables,
+		})
+	}
+
+	if templatedPolicyFile != "" {
+		fileData, err := helpers.LoadFromFile(templatedPolicyFile)
+		if err != nil {
+			return nil, err
+		}
+
+		var config map[string]map[string][]api.ACLTemplatedPolicyVariables
+		err = hcl.Decode(&config, fileData)
+		if err != nil {
+			return nil, err
+		}
+
+		for templateName, templateVariables := range config["TemplatedPolicy"] {
+			for _, tp := range templateVariables {
+				out = append(out, &api.ACLTemplatedPolicy{
+					TemplateName: templateName,
+					TemplateVariables: &api.ACLTemplatedPolicyVariables{
+						Name: tp.Name,
+					},
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+func ExtractBindVars(bindVars map[string]string) (*api.ACLTemplatedPolicyVariables, error) {
+	if len(bindVars) == 0 {
+		return nil, nil
+	}
+	out := &api.ACLTemplatedPolicyVariables{}
+	err := mapstructure.Decode(bindVars, out)
+	return out, err
+}
+
+func getTemplatedPolicyVariables(variables []string) (*api.ACLTemplatedPolicyVariables, error) {
+	if len(variables) == 0 {
+		return nil, nil
+	}
+
+	out := &api.ACLTemplatedPolicyVariables{}
+	jsonVariables := make(map[string]string)
+
+	for _, variable := range variables {
+		parts := strings.Split(variable, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("malformed -var argument: %q, expecting VariableName:Value", variable)
+		}
+		jsonVariables[parts[0]] = parts[1]
+	}
+
+	err := mapstructure.Decode(jsonVariables, out)
+	return out, err
 }
 
 // TestKubernetesJWT_A is a valid service account jwt extracted from a minikube setup.

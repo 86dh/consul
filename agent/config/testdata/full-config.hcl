@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 acl_agent_master_token = "furuQD0b"
 acl_agent_token = "cOshLOQ2"
 acl_datacenter = "m3urck3z"
@@ -282,6 +285,9 @@ enable_syslog = true
 encrypt = "A4wELWqH"
 encrypt_verify_incoming = true
 encrypt_verify_outgoing = true
+experiments = [
+    "foo"
+]
 http_config {
     block_endpoints = [ "RBvAFcGD", "fWOWFznh" ]
     allow_write_http_from = [ "127.0.0.1/8", "22.33.44.55/32", "0.0.0.0/0" ]
@@ -311,6 +317,10 @@ limits {
         write_rate = 101.0
     }
 }
+locality = {
+    region = "us-east-2"
+    zone = "us-east-2b"
+}
 log_level = "k1zo9Spt"
 log_json = true
 max_query_time = "18237s"
@@ -329,6 +339,8 @@ performance {
     leave_drain_time = "8265s"
     raft_multiplier = 5
     rpc_hold_timeout = "15707s"
+    grpc_keepalive_interval = "33s"
+    grpc_keepalive_timeout = "22s"
 }
 pid_file = "43xN80Km"
 ports {
@@ -353,14 +365,30 @@ raft_protocol = 3
 raft_snapshot_threshold = 16384
 raft_snapshot_interval = "30s"
 raft_trailing_logs = 83749
-raft_boltdb {
-    NoFreelistSync = true
+raft_logstore {
+    backend = "wal"
+    disable_log_cache = true
+    verification {
+        enabled = true
+        interval = "12345s"
+    }
+    boltdb {
+        no_freelist_sync = true
+    }
+    wal {
+       segment_size_mb = 15
+    }
 }
 read_replica = true
 reconnect_timeout = "23739s"
 reconnect_timeout_wan = "26694s"
 recursors = [ "63.38.39.58", "92.49.18.18" ]
 rejoin_after_leave = true
+reporting = {
+    license = {
+        enabled = false
+    }
+}
 retry_interval = "8067s"
 retry_interval_wan = "28866s"
 retry_join = [ "pbsSFY7U", "l0qLtWij" ]
@@ -375,6 +403,7 @@ serf_lan = "99.43.63.15"
 serf_wan = "67.88.33.19"
 server = true
 server_name = "Oerr9n1G"
+server_rejoin_age_max = "604800s"
 service = {
     id = "dLOXpSCI"
     name = "o1ynPkp0"
@@ -485,6 +514,10 @@ service = {
     connect {
         native = true
     }
+    locality = {
+        region = "us-west-1"
+        zone = "us-west-1a"
+    }
 }
 services = [
     {
@@ -524,6 +557,10 @@ services = [
         }
         connect {
             sidecar_service {}
+        }
+        locality = {
+            region = "us-east-1"
+            zone = "us-east-1a"
         }
     },
     {
@@ -670,6 +707,7 @@ telemetry {
     circonus_check_tags = "prvO4uBl"
     circonus_submission_interval = "DolzaflP"
     circonus_submission_url = "gTcbS93G"
+    enable_host_metrics = true
     disable_hostname = true
     dogstatsd_addr = "0wSndumK"
     dogstatsd_tags = [ "3N81zSUB","Xtj8AnXZ" ]
@@ -680,6 +718,7 @@ telemetry {
     prometheus_retention_time = "15s"
     statsd_address = "drce87cy"
     statsite_address = "HpFwKB8R"
+    disable_per_tenancy_usage_metrics = true
 }
 tls {
     defaults {

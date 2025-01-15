@@ -1,8 +1,9 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package testutils
 
 import (
-	"testing"
-
 	"github.com/stretchr/testify/require"
 
 	"github.com/hashicorp/go-uuid"
@@ -10,9 +11,10 @@ import (
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/acl/resolver"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/sdk/testutil"
 )
 
-func ACLAnonymous(t *testing.T) resolver.Result {
+func ACLAnonymous(t testutil.TestingTB) resolver.Result {
 	t.Helper()
 
 	return resolver.Result{
@@ -23,7 +25,7 @@ func ACLAnonymous(t *testing.T) resolver.Result {
 	}
 }
 
-func ACLsDisabled(t *testing.T) resolver.Result {
+func ACLsDisabled(t testutil.TestingTB) resolver.Result {
 	t.Helper()
 
 	return resolver.Result{
@@ -31,7 +33,7 @@ func ACLsDisabled(t *testing.T) resolver.Result {
 	}
 }
 
-func ACLNoPermissions(t *testing.T) resolver.Result {
+func ACLNoPermissions(t testutil.TestingTB) resolver.Result {
 	t.Helper()
 
 	return resolver.Result{
@@ -40,14 +42,14 @@ func ACLNoPermissions(t *testing.T) resolver.Result {
 	}
 }
 
-func ACLServiceWriteAny(t *testing.T) resolver.Result {
+func ACLServiceWriteAny(t testutil.TestingTB) resolver.Result {
 	t.Helper()
 
 	policy, err := acl.NewPolicyFromSource(`
 		service "foo" {
 			policy = "write"
 		}
-	`, acl.SyntaxCurrent, nil, nil)
+	`, nil, nil)
 	require.NoError(t, err)
 
 	authz, err := acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{policy}, nil)
@@ -59,7 +61,7 @@ func ACLServiceWriteAny(t *testing.T) resolver.Result {
 	}
 }
 
-func ACLServiceRead(t *testing.T, serviceName string) resolver.Result {
+func ACLServiceRead(t testutil.TestingTB, serviceName string) resolver.Result {
 	t.Helper()
 
 	aclRule := &acl.Policy{
@@ -81,7 +83,53 @@ func ACLServiceRead(t *testing.T, serviceName string) resolver.Result {
 	}
 }
 
-func randomACLIdentity(t *testing.T) structs.ACLIdentity {
+func ACLUseProvidedPolicy(t testutil.TestingTB, aclPolicy *acl.Policy) resolver.Result {
+	t.Helper()
+
+	authz, err := acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{aclPolicy}, nil)
+	require.NoError(t, err)
+
+	return resolver.Result{
+		Authorizer:  authz,
+		ACLIdentity: randomACLIdentity(t),
+	}
+}
+
+func ACLOperatorRead(t testutil.TestingTB) resolver.Result {
+	t.Helper()
+
+	aclRule := &acl.Policy{
+		PolicyRules: acl.PolicyRules{
+			Operator: acl.PolicyRead,
+		},
+	}
+	authz, err := acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{aclRule}, nil)
+	require.NoError(t, err)
+
+	return resolver.Result{
+		Authorizer:  authz,
+		ACLIdentity: randomACLIdentity(t),
+	}
+}
+
+func ACLOperatorWrite(t testutil.TestingTB) resolver.Result {
+	t.Helper()
+
+	aclRule := &acl.Policy{
+		PolicyRules: acl.PolicyRules{
+			Operator: acl.PolicyWrite,
+		},
+	}
+	authz, err := acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{aclRule}, nil)
+	require.NoError(t, err)
+
+	return resolver.Result{
+		Authorizer:  authz,
+		ACLIdentity: randomACLIdentity(t),
+	}
+}
+
+func randomACLIdentity(t testutil.TestingTB) structs.ACLIdentity {
 	id, err := uuid.GenerateUUID()
 	require.NoError(t, err)
 
