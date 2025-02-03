@@ -1,11 +1,12 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
 	"context"
 	"fmt"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"golang.org/x/time/rate"
 
@@ -72,24 +73,31 @@ func (s *Server) stopConnectLeader() {
 }
 
 func (s *Server) runConfigEntryControllers(ctx context.Context) error {
-	group, ctx := errgroup.WithContext(ctx)
-
-	group.Go(func() error {
-		logger := s.logger.Named(logging.APIGatewayController)
-		return gateways.NewAPIGatewayController(s.fsm, s.publisher, logger).Run(ctx)
-	})
-
-	group.Go(func() error {
-		logger := s.logger.Named(logging.HTTPRouteController)
-		return gateways.NewHTTPRouteController(s.fsm, s.publisher, logger).Run(ctx)
-	})
-
-	group.Go(func() error {
-		logger := s.logger.Named(logging.TCPRouteController)
-		return gateways.NewTCPRouteController(s.fsm, s.publisher, logger).Run(ctx)
-	})
-
-	return group.Wait()
+	updater := &gateways.Updater{
+		UpdateWithStatus: func(entry structs.ControlledConfigEntry) error {
+			_, err := s.leaderRaftApply("ConfigEntry.Apply", structs.ConfigEntryRequestType, &structs.ConfigEntryRequest{
+				Op:    structs.ConfigEntryUpsertWithStatusCAS,
+				Entry: entry,
+			})
+			return err
+		},
+		Update: func(entry structs.ConfigEntry) error {
+			_, err := s.leaderRaftApply("ConfigEntry.Apply", structs.ConfigEntryRequestType, &structs.ConfigEntryRequest{
+				Op:    structs.ConfigEntryUpsertCAS,
+				Entry: entry,
+			})
+			return err
+		},
+		Delete: func(entry structs.ConfigEntry) error {
+			_, err := s.leaderRaftApply("ConfigEntry.Delete", structs.ConfigEntryRequestType, &structs.ConfigEntryRequest{
+				Op:    structs.ConfigEntryDeleteCAS,
+				Entry: entry,
+			})
+			return err
+		},
+	}
+	logger := s.logger.Named(logging.APIGatewayController)
+	return gateways.NewAPIGatewayController(s.fsm, s.publisher, updater, logger).Run(ctx)
 }
 
 func (s *Server) runCARootPruning(ctx context.Context) error {
@@ -199,7 +207,7 @@ func (s *Server) setVirtualIPFlags() (bool, error) {
 }
 
 func (s *Server) setVirtualIPVersionFlag() (bool, error) {
-	val, err := s.getSystemMetadata(structs.SystemMetadataVirtualIPsEnabled)
+	val, err := s.GetSystemMetadata(structs.SystemMetadataVirtualIPsEnabled)
 	if err != nil {
 		return false, err
 	}
@@ -212,7 +220,7 @@ func (s *Server) setVirtualIPVersionFlag() (bool, error) {
 			minVirtualIPVersion.String())
 	}
 
-	if err := s.setSystemMetadataKey(structs.SystemMetadataVirtualIPsEnabled, "true"); err != nil {
+	if err := s.SetSystemMetadataKey(structs.SystemMetadataVirtualIPsEnabled, "true"); err != nil {
 		return false, nil
 	}
 
@@ -220,7 +228,7 @@ func (s *Server) setVirtualIPVersionFlag() (bool, error) {
 }
 
 func (s *Server) setVirtualIPTerminatingGatewayVersionFlag() (bool, error) {
-	val, err := s.getSystemMetadata(structs.SystemMetadataTermGatewayVirtualIPsEnabled)
+	val, err := s.GetSystemMetadata(structs.SystemMetadataTermGatewayVirtualIPsEnabled)
 	if err != nil {
 		return false, err
 	}
@@ -233,7 +241,7 @@ func (s *Server) setVirtualIPTerminatingGatewayVersionFlag() (bool, error) {
 			minVirtualIPTerminatingGatewayVersion.String())
 	}
 
-	if err := s.setSystemMetadataKey(structs.SystemMetadataTermGatewayVirtualIPsEnabled, "true"); err != nil {
+	if err := s.SetSystemMetadataKey(structs.SystemMetadataTermGatewayVirtualIPsEnabled, "true"); err != nil {
 		return false, nil
 	}
 

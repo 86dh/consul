@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 // package oidcauthtest exposes tools to assist in writing unit tests of OIDC
 // and JWT authentication workflows.
 //
@@ -24,9 +27,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-jose/go-jose/v3"
+	"github.com/go-jose/go-jose/v3/jwt"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/square/go-jose.v2"
-	"gopkg.in/square/go-jose.v2/jwt"
 
 	"github.com/hashicorp/consul/internal/go-sso/oidcauth/internal/strutil"
 )

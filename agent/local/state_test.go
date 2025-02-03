@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package local_test
 
 import (
@@ -186,7 +189,8 @@ func TestAgentAntiEntropy_Services(t *testing.T) {
 	id := services.NodeServices.Node.ID
 	addrs := services.NodeServices.Node.TaggedAddresses
 	meta := services.NodeServices.Node.Meta
-	delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+	delete(meta, structs.MetaSegmentKey)    // Added later, not in config.
+	delete(meta, structs.MetaConsulVersion) // Added later, not in config.
 	assert.Equal(t, a.Config.NodeID, id)
 	assert.Equal(t, a.Config.TaggedAddresses, addrs)
 	assert.Equal(t, unNilMap(a.Config.NodeMeta), meta)
@@ -829,10 +833,6 @@ func TestAgentAntiEntropy_Services_WithChecks(t *testing.T) {
 }
 
 var testRegisterRules = `
- node "" {
- 	policy = "write"
- }
-
  service "api" {
  	policy = "write"
  }
@@ -862,6 +862,9 @@ func TestAgentAntiEntropy_Services_ACLDeny(t *testing.T) {
 	`)
 	defer a.Shutdown()
 	testrpc.WaitForLeader(t, a.RPC, "dc1")
+
+	// The agent token is the only token used for deleteService.
+	setAgentToken(t, a)
 
 	token := createToken(t, a, testRegisterRules)
 
@@ -1153,15 +1156,19 @@ type RPC interface {
 func createToken(t *testing.T, rpc RPC, policyRules string) string {
 	t.Helper()
 
+	uniqueId, err := uuid.GenerateUUID()
+	require.NoError(t, err)
+	policyName := "the-policy-" + uniqueId
+
 	reqPolicy := structs.ACLPolicySetRequest{
 		Datacenter: "dc1",
 		Policy: structs.ACLPolicy{
-			Name:  "the-policy",
+			Name:  policyName,
 			Rules: policyRules,
 		},
 		WriteRequest: structs.WriteRequest{Token: "root"},
 	}
-	err := rpc.RPC(context.Background(), "ACL.PolicySet", &reqPolicy, &structs.ACLPolicy{})
+	err = rpc.RPC(context.Background(), "ACL.PolicySet", &reqPolicy, &structs.ACLPolicy{})
 	require.NoError(t, err)
 
 	token, err := uuid.GenerateUUID()
@@ -1171,13 +1178,34 @@ func createToken(t *testing.T, rpc RPC, policyRules string) string {
 		Datacenter: "dc1",
 		ACLToken: structs.ACLToken{
 			SecretID: token,
-			Policies: []structs.ACLTokenPolicyLink{{Name: "the-policy"}},
+			Policies: []structs.ACLTokenPolicyLink{{Name: policyName}},
 		},
 		WriteRequest: structs.WriteRequest{Token: "root"},
 	}
 	err = rpc.RPC(context.Background(), "ACL.TokenSet", &reqToken, &structs.ACLToken{})
 	require.NoError(t, err)
 	return token
+}
+
+// setAgentToken sets the 'agent' token for this agent. It creates a new token
+// with node:write for the agent's node name, and service:write for any
+// service.
+func setAgentToken(t *testing.T, a *agent.TestAgent) {
+	var policy = fmt.Sprintf(`
+	  node "%s" {
+		policy = "write"
+	  }
+	  service_prefix "" {
+		policy = "read"
+	  }
+	`, a.Config.NodeName)
+
+	token := createToken(t, a, policy)
+
+	_, err := a.Client().Agent().UpdateAgentACLToken(token, &api.WriteOptions{Token: "root"})
+	if err != nil {
+		t.Fatalf("setting agent token: %v", err)
+	}
 }
 
 func TestAgentAntiEntropy_Checks(t *testing.T) {
@@ -1293,13 +1321,13 @@ func TestAgentAntiEntropy_Checks(t *testing.T) {
 			chk.CreateIndex, chk.ModifyIndex = 0, 0
 			switch chk.CheckID {
 			case "mysql":
-				require.Equal(t, chk, chk1)
+				require.Equal(r, chk, chk1)
 			case "redis":
-				require.Equal(t, chk, chk2)
+				require.Equal(r, chk, chk2)
 			case "web":
-				require.Equal(t, chk, chk3)
+				require.Equal(r, chk, chk3)
 			case "cache":
-				require.Equal(t, chk, chk5)
+				require.Equal(r, chk, chk5)
 			case "serfHealth":
 				// ignore
 			default:
@@ -1328,10 +1356,11 @@ func TestAgentAntiEntropy_Checks(t *testing.T) {
 			id := services.NodeServices.Node.ID
 			addrs := services.NodeServices.Node.TaggedAddresses
 			meta := services.NodeServices.Node.Meta
-			delete(meta, structs.MetaSegmentKey) // Added later, not in config.
-			assert.Equal(t, a.Config.NodeID, id)
-			assert.Equal(t, a.Config.TaggedAddresses, addrs)
-			assert.Equal(t, unNilMap(a.Config.NodeMeta), meta)
+			delete(meta, structs.MetaSegmentKey)    // Added later, not in config.
+			delete(meta, structs.MetaConsulVersion) // Added later, not in config.
+			assert.Equal(r, a.Config.NodeID, id)
+			assert.Equal(r, a.Config.TaggedAddresses, addrs)
+			assert.Equal(r, unNilMap(a.Config.NodeMeta), meta)
 		}
 	})
 	retry.Run(t, func(r *retry.R) {
@@ -1358,11 +1387,11 @@ func TestAgentAntiEntropy_Checks(t *testing.T) {
 			chk.CreateIndex, chk.ModifyIndex = 0, 0
 			switch chk.CheckID {
 			case "mysql":
-				require.Equal(t, chk1, chk)
+				require.Equal(r, chk1, chk)
 			case "web":
-				require.Equal(t, chk3, chk)
+				require.Equal(r, chk3, chk)
 			case "cache":
-				require.Equal(t, chk5, chk)
+				require.Equal(r, chk5, chk)
 			case "serfHealth":
 				// ignore
 			default:
@@ -1480,6 +1509,9 @@ func TestAgentAntiEntropy_Checks_ACLDeny(t *testing.T) {
 	defer a.Shutdown()
 
 	testrpc.WaitForLeader(t, a.RPC, dc)
+
+	// The agent token is the only token used for deleteCheck.
+	setAgentToken(t, a)
 
 	token := createToken(t, a, testRegisterRules)
 
@@ -1947,6 +1979,10 @@ func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
 		node_id = "40e4a748-2192-161a-0510-9bf59fe950b5"
 		node_meta {
 			somekey = "somevalue"
+		}
+		locality {
+			region = "us-west-1"
+			zone = "us-west-1a"
 		}`}
 	if err := a.Start(t); err != nil {
 		t.Fatal(err)
@@ -1981,10 +2017,13 @@ func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
 	id := services.NodeServices.Node.ID
 	addrs := services.NodeServices.Node.TaggedAddresses
 	meta := services.NodeServices.Node.Meta
-	delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+	nodeLocality := services.NodeServices.Node.Locality
+	delete(meta, structs.MetaSegmentKey)    // Added later, not in config.
+	delete(meta, structs.MetaConsulVersion) // Added later, not in config.
 	require.Equal(t, a.Config.NodeID, id)
 	require.Equal(t, a.Config.TaggedAddresses, addrs)
-	assert.Equal(t, unNilMap(a.Config.NodeMeta), meta)
+	require.Equal(t, a.Config.StructLocality(), nodeLocality)
+	require.Equal(t, unNilMap(a.Config.NodeMeta), meta)
 
 	// Blow away the catalog version of the node info
 	if err := a.RPC(context.Background(), "Catalog.Register", args, &out); err != nil {
@@ -2004,9 +2043,12 @@ func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
 		id := services.NodeServices.Node.ID
 		addrs := services.NodeServices.Node.TaggedAddresses
 		meta := services.NodeServices.Node.Meta
-		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+		nodeLocality := services.NodeServices.Node.Locality
+		delete(meta, structs.MetaSegmentKey)    // Added later, not in config.
+		delete(meta, structs.MetaConsulVersion) // Added later, not in config.
 		require.Equal(t, nodeID, id)
 		require.Equal(t, a.Config.TaggedAddresses, addrs)
+		require.Equal(t, a.Config.StructLocality(), nodeLocality)
 		require.Equal(t, nodeMeta, meta)
 	}
 }

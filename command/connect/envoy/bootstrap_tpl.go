@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package envoy
 
 // BootstrapTplArgs is the set of arguments that may be interpolated into the
@@ -5,7 +8,7 @@ package envoy
 type BootstrapTplArgs struct {
 	GRPC
 
-	// ProxyCluster is the cluster name for the the Envoy `node` specification and
+	// ProxyCluster is the cluster name for the Envoy `node` specification and
 	// is typically the same as the ProxyID.
 	ProxyCluster string
 
@@ -158,7 +161,15 @@ type GRPC struct {
 const bootstrapTemplate = `{
   "admin": {
 	{{- if (not .AdminAccessLogConfig) }}
-    "access_log_path": "{{ .AdminAccessLogPath }}",
+    "access_log": [
+      {
+        "name": "envoy.access_loggers.file",
+        "typed_config": {
+          "@type": "type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog",
+          "path": "{{ .AdminAccessLogPath }}"
+        }
+      }
+    ],
 	{{- end}}
 	{{- if .AdminAccessLogConfig }}
     "access_log": [
@@ -217,7 +228,14 @@ const bootstrapTemplate = `{
           }
         },
         {{- end }}
-        "http2_protocol_options": {},
+        "typed_extension_protocol_options": {
+		  "envoy.extensions.upstreams.http.v3.HttpProtocolOptions": {
+			"@type": "type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
+			"explicit_http_config": {
+			  "http2_protocol_options": {}
+			}
+		  }
+		},
         "loadAssignment": {
           "clusterName": "{{ .LocalAgentClusterName }}",
           "endpoints": [
@@ -262,7 +280,9 @@ const bootstrapTemplate = `{
     {{- end }}
   },
   {{- if .StatsSinksJSON }}
-  "stats_sinks": {{ .StatsSinksJSON }},
+  "stats_sinks": [
+    {{ .StatsSinksJSON }}
+  ],
   {{- end }}
   {{- if .StatsConfigJSON }}
   "stats_config": {{ .StatsConfigJSON }},
@@ -276,10 +296,12 @@ const bootstrapTemplate = `{
   "dynamic_resources": {
     "lds_config": {
       "ads": {},
+      "initial_fetch_timeout": "0s",
       "resource_api_version": "V3"
     },
     "cds_config": {
       "ads": {},
+      "initial_fetch_timeout": "0s",
       "resource_api_version": "V3"
     },
     "ads_config": {

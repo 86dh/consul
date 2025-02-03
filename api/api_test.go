@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package api
 
 import (
@@ -50,6 +53,35 @@ func makeACLClient(t *testing.T) (*Client, *testutil.TestServer) {
 	})
 }
 
+// Makes a client with Audit enabled, it requires ACLs
+func makeAuditClient(t *testing.T) (*Client, *testutil.TestServer) {
+	return makeClientWithConfig(t, func(clientConfig *Config) {
+		clientConfig.Token = "root"
+	}, func(serverConfig *testutil.TestServerConfig) {
+		serverConfig.PrimaryDatacenter = "dc1"
+		serverConfig.ACL.Tokens.InitialManagement = "root"
+		serverConfig.ACL.Tokens.Agent = "root"
+		serverConfig.ACL.Enabled = true
+		serverConfig.ACL.DefaultPolicy = "deny"
+		serverConfig.Audit = &testutil.TestAuditConfig{
+			Enabled: true,
+		}
+	})
+}
+
+func makeNonBootstrappedACLClient(t *testing.T, defaultPolicy string) (*Client, *testutil.TestServer) {
+	return makeClientWithConfig(t,
+		func(clientConfig *Config) {
+			clientConfig.Token = ""
+		},
+		func(serverConfig *testutil.TestServerConfig) {
+			serverConfig.PrimaryDatacenter = "dc1"
+			serverConfig.ACL.Enabled = true
+			serverConfig.ACL.DefaultPolicy = defaultPolicy
+			serverConfig.Bootstrap = true
+		})
+}
+
 func makeClientWithCA(t *testing.T) (*Client, *testutil.TestServer) {
 	return makeClientWithConfig(t,
 		func(c *Config) {
@@ -87,7 +119,7 @@ func makeClientWithConfig(
 	var server *testutil.TestServer
 	var err error
 	retry.RunWith(retry.ThreeTimes(), t, func(r *retry.R) {
-		server, err = testutil.NewTestServerConfigT(t, cb2)
+		server, err = testutil.NewTestServerConfigT(r, cb2)
 		if err != nil {
 			r.Fatalf("Failed to start server: %v", err.Error())
 		}
@@ -159,19 +191,21 @@ func testNodeServiceCheckRegistrations(t *testing.T, client *Client, datacenter 
 					Notes:   "foo has ssh access",
 				},
 			},
+			Locality: &Locality{Region: "us-west-1", Zone: "us-west-1a"},
 		},
 		"Service redis v1 on foo": {
 			Datacenter:     datacenter,
 			Node:           "foo",
 			SkipNodeUpdate: true,
 			Service: &AgentService{
-				Kind:    ServiceKindTypical,
-				ID:      "redisV1",
-				Service: "redis",
-				Tags:    []string{"v1"},
-				Meta:    map[string]string{"version": "1"},
-				Port:    1234,
-				Address: "198.18.1.2",
+				Kind:     ServiceKindTypical,
+				ID:       "redisV1",
+				Service:  "redis",
+				Tags:     []string{"v1"},
+				Meta:     map[string]string{"version": "1"},
+				Port:     1234,
+				Address:  "198.18.1.2",
+				Locality: &Locality{Region: "us-west-1", Zone: "us-west-1a"},
 			},
 			Checks: HealthChecks{
 				&HealthCheck{
@@ -683,8 +717,11 @@ func TestAPI_ClientTLSOptions(t *testing.T) {
 
 		// Should fail
 		_, err = client.Agent().Self()
-		if err == nil || !strings.Contains(err.Error(), "bad certificate") {
-			t.Fatal(err)
+		// Check for one of the possible cert error messages
+		// See https://cs.opensource.google/go/go/+/62a994837a57a7d0c58bb364b580a389488446c9
+		if err == nil || !(strings.Contains(err.Error(), "tls: bad certificate") ||
+			strings.Contains(err.Error(), "tls: certificate required")) {
+			t.Fatalf("expected tls certificate error, but got '%v'", err)
 		}
 	})
 
@@ -898,22 +935,13 @@ func TestAPI_Headers(t *testing.T) {
 
 	_, _, err = kv.Get("test-headers", nil)
 	require.NoError(t, err)
-	require.Equal(t, "", request.Header.Get("Content-Type"))
+	require.Equal(t, "application/json", request.Header.Get("Content-Type"))
 
 	_, err = kv.Delete("test-headers", nil)
 	require.NoError(t, err)
-	require.Equal(t, "", request.Header.Get("Content-Type"))
+	require.Equal(t, "application/json", request.Header.Get("Content-Type"))
 
 	err = c.Snapshot().Restore(nil, strings.NewReader("foo"))
-	require.Error(t, err)
-	require.Equal(t, "application/octet-stream", request.Header.Get("Content-Type"))
-
-	_, err = c.ACL().RulesTranslate(strings.NewReader(`
-	agent "" {
-	  policy = "read"
-	}
-	`))
-	// ACL support is disabled
 	require.Error(t, err)
 	require.Equal(t, "application/octet-stream", request.Header.Get("Content-Type"))
 
@@ -923,6 +951,24 @@ func TestAPI_Headers(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	require.Equal(t, "application/octet-stream", request.Header.Get("Content-Type"))
+}
+
+func TestAPI_Deprecated(t *testing.T) {
+	t.Parallel()
+	c, s := makeClientWithConfig(t, func(c *Config) {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		c.Transport = transport
+	}, nil)
+	defer s.Stop()
+	// Rules translation functionality was completely removed in Consul 1.15.
+	_, err := c.ACL().RulesTranslate(strings.NewReader(`
+	agent "" {
+	  policy = "read"
+	}
+	`))
+	require.Error(t, err)
+	_, err = c.ACL().RulesTranslateToken("")
+	require.Error(t, err)
 }
 
 func TestAPI_RequestToHTTP(t *testing.T) {

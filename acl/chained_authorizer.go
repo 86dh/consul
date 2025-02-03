@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package acl
 
 // ChainedAuthorizer can combine multiple Authorizers into one.
@@ -81,6 +84,7 @@ func (c *ChainedAuthorizer) EventWrite(name string, entCtx *AuthorizerContext) E
 // when no intentions match a Connect request.
 func (c *ChainedAuthorizer) IntentionDefaultAllow(entCtx *AuthorizerContext) EnforcementDecision {
 	return c.executeChain(func(authz Authorizer) EnforcementDecision {
+		//nolint:staticcheck
 		return authz.IntentionDefaultAllow(entCtx)
 	})
 }
@@ -243,6 +247,12 @@ func (c *ChainedAuthorizer) ServiceReadAll(entCtx *AuthorizerContext) Enforcemen
 	})
 }
 
+func (c *ChainedAuthorizer) ServiceReadPrefix(prefix string, entCtx *AuthorizerContext) EnforcementDecision {
+	return c.executeChain(func(authz Authorizer) EnforcementDecision {
+		return authz.ServiceReadPrefix(prefix, entCtx)
+	})
+}
+
 // ServiceWrite checks for permission to create or update a given
 // service
 func (c *ChainedAuthorizer) ServiceWrite(name string, entCtx *AuthorizerContext) EnforcementDecision {
@@ -277,6 +287,21 @@ func (c *ChainedAuthorizer) SessionWrite(node string, entCtx *AuthorizerContext)
 func (c *ChainedAuthorizer) Snapshot(entCtx *AuthorizerContext) EnforcementDecision {
 	return c.executeChain(func(authz Authorizer) EnforcementDecision {
 		return authz.Snapshot(entCtx)
+	})
+}
+
+// TrafficPermissionsRead determines if specific traffic permissions can be read.
+func (c *ChainedAuthorizer) TrafficPermissionsRead(prefix string, entCtx *AuthorizerContext) EnforcementDecision {
+	return c.executeChain(func(authz Authorizer) EnforcementDecision {
+		return authz.TrafficPermissionsRead(prefix, entCtx)
+	})
+}
+
+// TrafficPermissionsWrite determines if specific traffic permissions can be
+// created, modified, or deleted.
+func (c *ChainedAuthorizer) TrafficPermissionsWrite(prefix string, entCtx *AuthorizerContext) EnforcementDecision {
+	return c.executeChain(func(authz Authorizer) EnforcementDecision {
+		return authz.TrafficPermissionsWrite(prefix, entCtx)
 	})
 }
 

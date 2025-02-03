@@ -1,5 +1,9 @@
+/**
+ * Copyright (c) HashiCorp, Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ */
+
 import Service, { inject as service } from '@ember/service';
-import lint from 'consul-ui/utils/editor/lint';
 const MODES = [
   {
     name: 'JSON',
@@ -34,10 +38,6 @@ export default class LinterService extends Service {
 
   modes() {
     return MODES;
-  }
-
-  lint() {
-    return lint(...arguments);
   }
 
   getEditor(element) {

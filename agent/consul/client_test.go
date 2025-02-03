@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
@@ -176,7 +179,7 @@ func TestClient_LANReap(t *testing.T) {
 	retry.Run(t, func(r *retry.R) {
 		require.Len(r, c1.LANMembersInAgentPartition(), 1)
 		server := c1.router.FindLANServer()
-		require.Nil(t, server)
+		require.Nil(r, server)
 	})
 }
 
@@ -501,14 +504,18 @@ func newClient(t *testing.T, config *Config) *Client {
 	return client
 }
 
-func newTestResolverConfig(t *testing.T, suffix string) resolver.Config {
+func newTestResolverConfig(t testutil.TestingTB, suffix string, dc, agentType string) resolver.Config {
 	n := t.Name()
 	s := strings.Replace(n, "/", "", -1)
 	s = strings.Replace(s, "_", "", -1)
-	return resolver.Config{Authority: strings.ToLower(s) + "-" + suffix}
+	return resolver.Config{
+		Datacenter: dc,
+		AgentType:  agentType,
+		Authority:  strings.ToLower(s) + "-" + suffix,
+	}
 }
 
-func newDefaultDeps(t *testing.T, c *Config) Deps {
+func newDefaultDeps(t testutil.TestingTB, c *Config) Deps {
 	t.Helper()
 
 	logger := hclog.NewInterceptLogger(&hclog.LoggerOptions{
@@ -520,11 +527,15 @@ func newDefaultDeps(t *testing.T, c *Config) Deps {
 	tls, err := tlsutil.NewConfigurator(c.TLSConfig, logger)
 	require.NoError(t, err, "failed to create tls configuration")
 
-	resolverBuilder := resolver.NewServerResolverBuilder(newTestResolverConfig(t, c.NodeName+"-"+c.Datacenter))
+	resolverBuilder := resolver.NewServerResolverBuilder(newTestResolverConfig(t, c.NodeName+"-"+c.Datacenter, c.Datacenter, "server"))
 	resolver.Register(resolverBuilder)
+	t.Cleanup(func() {
+		resolver.Deregister(resolverBuilder.Authority())
+	})
 
 	balancerBuilder := balancer.NewBuilder(resolverBuilder.Authority(), testutil.Logger(t))
 	balancerBuilder.Register()
+	t.Cleanup(balancerBuilder.Deregister)
 
 	r := router.NewRouter(
 		logger,
@@ -559,13 +570,13 @@ func newDefaultDeps(t *testing.T, c *Config) Deps {
 			UseTLSForDC:           tls.UseTLS,
 			DialingFromServer:     true,
 			DialingFromDatacenter: c.Datacenter,
-			BalancerBuilder:       balancerBuilder,
 		}),
 		LeaderForwarder:          resolverBuilder,
 		NewRequestRecorderFunc:   middleware.NewRequestRecorder,
 		GetNetRPCInterceptorFunc: middleware.GetNetRPCInterceptor,
 		EnterpriseDeps:           newDefaultDepsEnterprise(t, logger, c),
 		XDSStreamLimiter:         limiter.NewSessionLimiter(),
+		Registry:                 NewTypeRegistry(),
 	}
 }
 
@@ -821,6 +832,7 @@ func TestClient_ReloadConfig(t *testing.T) {
 	deps := newDefaultDeps(t, &Config{NodeName: "node1", Datacenter: "dc1"})
 	c, err := NewClient(cfg, deps)
 	require.NoError(t, err)
+	defer c.Shutdown()
 
 	limiter := c.rpcLimiter.Load().(*rate.Limiter)
 	require.Equal(t, rate.Limit(500), limiter.Limit())
@@ -866,7 +878,6 @@ func TestClient_ShortReconnectTimeout(t *testing.T) {
 		func() bool {
 			return len(cluster.Servers[0].LANMembersInAgentPartition()) == 2 &&
 				len(cluster.Clients[0].LANMembersInAgentPartition()) == 2
-
 		},
 		time.Second,
 		50*time.Millisecond,
@@ -898,6 +909,7 @@ func TestClient_RPC_Timeout(t *testing.T) {
 		c.MaxQueryTime = 200 * time.Millisecond
 		c.RPCHoldTimeout = 50 * time.Millisecond
 	})
+	defer c1.Shutdown()
 	joinLAN(t, c1, s1)
 
 	retry.Run(t, func(r *retry.R) {
