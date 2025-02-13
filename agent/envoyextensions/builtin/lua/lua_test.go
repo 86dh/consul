@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package lua
 
 import (
@@ -5,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/hashicorp/consul/agent/envoyextensions/extensioncommon"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/envoyextensions/extensioncommon"
 )
 
 func TestConstructor(t *testing.T) {
@@ -50,6 +53,15 @@ func TestConstructor(t *testing.T) {
 		"invalid listener": {
 			arguments: makeArguments(map[string]interface{}{"Listener": "invalid"}),
 			ok:        false,
+		},
+		"default proxy type": {
+			arguments: makeArguments(map[string]interface{}{"ProxyType": ""}),
+			expected: lua{
+				ProxyType: "connect-proxy",
+				Listener:  "inbound",
+				Script:    "lua-script",
+			},
+			ok: true,
 		},
 		"valid everything": {
 			arguments: makeArguments(map[string]interface{}{}),

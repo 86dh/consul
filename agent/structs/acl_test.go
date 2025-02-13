@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package structs
 
 import (
@@ -67,7 +70,6 @@ func TestStructs_ACLServiceIdentity_SyntheticPolicy(t *testing.T) {
 			}
 
 			expect := &ACLPolicy{
-				Syntax:      acl.SyntaxCurrent,
 				Datacenters: test.datacenters,
 				Rules:       test.expectRules,
 			}
@@ -401,8 +403,7 @@ func TestStructs_ACLPolicies_resolveWithCache(t *testing.T) {
 			ID:          "5d5653a1-2c2b-4b36-b083-fc9f1398eb7b",
 			Name:        "policy1",
 			Description: "policy1",
-			Rules:       `node_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
+			Rules:       `node_prefix "" { policy = "read", policy = "read", },`,
 			RaftIndex: RaftIndex{
 				CreateIndex: 1,
 				ModifyIndex: 2,
@@ -412,8 +413,7 @@ func TestStructs_ACLPolicies_resolveWithCache(t *testing.T) {
 			ID:          "b35541f0-a88a-48da-bc66-43553c60b628",
 			Name:        "policy2",
 			Description: "policy2",
-			Rules:       `agent_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
+			Rules:       `agent_prefix "" { policy = "read" } `,
 			RaftIndex: RaftIndex{
 				CreateIndex: 3,
 				ModifyIndex: 4,
@@ -424,7 +424,6 @@ func TestStructs_ACLPolicies_resolveWithCache(t *testing.T) {
 			Name:        "policy3",
 			Description: "policy3",
 			Rules:       `key_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
 			RaftIndex: RaftIndex{
 				CreateIndex: 5,
 				ModifyIndex: 6,
@@ -434,8 +433,8 @@ func TestStructs_ACLPolicies_resolveWithCache(t *testing.T) {
 			ID:          "8bf38965-95e5-4e86-9be7-f6070cc0708b",
 			Name:        "policy4",
 			Description: "policy4",
-			Rules:       `service_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
+			//test should still pass even with the duplicate key since its resolving the cache
+			Rules: `service_prefix "" { policy = "read"  policy = "read" }`,
 			RaftIndex: RaftIndex{
 				CreateIndex: 7,
 				ModifyIndex: 8,
@@ -492,7 +491,6 @@ func TestStructs_ACLPolicies_Compile(t *testing.T) {
 			Name:        "policy1",
 			Description: "policy1",
 			Rules:       `node_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
 			RaftIndex: RaftIndex{
 				CreateIndex: 1,
 				ModifyIndex: 2,
@@ -503,7 +501,6 @@ func TestStructs_ACLPolicies_Compile(t *testing.T) {
 			Name:        "policy2",
 			Description: "policy2",
 			Rules:       `agent_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
 			RaftIndex: RaftIndex{
 				CreateIndex: 3,
 				ModifyIndex: 4,
@@ -514,7 +511,6 @@ func TestStructs_ACLPolicies_Compile(t *testing.T) {
 			Name:        "policy3",
 			Description: "policy3",
 			Rules:       `key_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
 			RaftIndex: RaftIndex{
 				CreateIndex: 5,
 				ModifyIndex: 6,
@@ -525,7 +521,6 @@ func TestStructs_ACLPolicies_Compile(t *testing.T) {
 			Name:        "policy4",
 			Description: "policy4",
 			Rules:       `service_prefix "" { policy = "read" }`,
-			Syntax:      acl.SyntaxCurrent,
 			RaftIndex: RaftIndex{
 				CreateIndex: 7,
 				ModifyIndex: 8,

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
@@ -21,7 +24,6 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
 	"github.com/hashicorp/raft"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
@@ -31,6 +33,7 @@ import (
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/connect"
 	"github.com/hashicorp/consul/agent/consul/rate"
+	rpcRate "github.com/hashicorp/consul/agent/consul/rate"
 	"github.com/hashicorp/consul/agent/consul/state"
 	agent_grpc "github.com/hashicorp/consul/agent/grpc-internal"
 	"github.com/hashicorp/consul/agent/pool"
@@ -38,7 +41,7 @@ import (
 	tokenStore "github.com/hashicorp/consul/agent/token"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/lib"
-	"github.com/hashicorp/consul/proto/pbsubscribe"
+	"github.com/hashicorp/consul/proto/private/pbsubscribe"
 	"github.com/hashicorp/consul/sdk/testutil"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/testrpc"
@@ -228,135 +231,11 @@ func (m *MockSink) Close() error {
 	return nil
 }
 
+// TestServer_blockingQuery tests authenticated and unauthenticated calls.  The
+// other blocking query tests reside in blockingquery_test.go in the blockingquery package.
 func TestServer_blockingQuery(t *testing.T) {
 	t.Parallel()
 	_, s := testServerWithConfig(t)
-
-	// Perform a non-blocking query. Note that it's significant that the meta has
-	// a zero index in response - the implied opts.MinQueryIndex is also zero but
-	// this should not block still.
-	t.Run("non-blocking query", func(t *testing.T) {
-		var opts structs.QueryOptions
-		var meta structs.QueryMeta
-		var calls int
-		fn := func(_ memdb.WatchSet, _ *state.Store) error {
-			calls++
-			return nil
-		}
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.NoError(t, err)
-		require.Equal(t, 1, calls)
-	})
-
-	// Perform a blocking query that gets woken up and loops around once.
-	t.Run("blocking query - single loop", func(t *testing.T) {
-		opts := structs.QueryOptions{
-			MinQueryIndex: 3,
-		}
-		var meta structs.QueryMeta
-		var calls int
-		fn := func(ws memdb.WatchSet, _ *state.Store) error {
-			if calls == 0 {
-				meta.Index = 3
-
-				fakeCh := make(chan struct{})
-				close(fakeCh)
-				ws.Add(fakeCh)
-			} else {
-				meta.Index = 4
-			}
-			calls++
-			return nil
-		}
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.NoError(t, err)
-		require.Equal(t, 2, calls)
-	})
-
-	// Perform a blocking query that returns a zero index from blocking func (e.g.
-	// no state yet). This should still return an empty response immediately, but
-	// with index of 1 and then block on the next attempt. In one sense zero index
-	// is not really a valid response from a state method that is not an error but
-	// in practice a lot of state store operations do return it unless they
-	// explicitly special checks to turn 0 into 1. Often this is not caught or
-	// covered by tests but eventually when hit in the wild causes blocking
-	// clients to busy loop and burn CPU. This test ensure that blockingQuery
-	// systematically does the right thing to prevent future bugs like that.
-	t.Run("blocking query with 0 modifyIndex from state func", func(t *testing.T) {
-		opts := structs.QueryOptions{
-			MinQueryIndex: 0,
-		}
-		var meta structs.QueryMeta
-		var calls int
-		fn := func(ws memdb.WatchSet, _ *state.Store) error {
-			if opts.MinQueryIndex > 0 {
-				// If client requested blocking, block forever. This is simulating
-				// waiting for the watched resource to be initialized/written to giving
-				// it a non-zero index. Note the timeout on the query options is relied
-				// on to stop the test taking forever.
-				fakeCh := make(chan struct{})
-				ws.Add(fakeCh)
-			}
-			meta.Index = 0
-			calls++
-			return nil
-		}
-		require.NoError(t, s.blockingQuery(&opts, &meta, fn))
-		assert.Equal(t, 1, calls)
-		assert.Equal(t, uint64(1), meta.Index,
-			"expect fake index of 1 to force client to block on next update")
-
-		// Simulate client making next request
-		opts.MinQueryIndex = 1
-		opts.MaxQueryTime = 20 * time.Millisecond // Don't wait too long
-
-		// This time we should block even though the func returns index 0 still
-		t0 := time.Now()
-		require.NoError(t, s.blockingQuery(&opts, &meta, fn))
-		t1 := time.Now()
-		assert.Equal(t, 2, calls)
-		assert.Equal(t, uint64(1), meta.Index,
-			"expect fake index of 1 to force client to block on next update")
-		assert.True(t, t1.Sub(t0) > 20*time.Millisecond,
-			"should have actually blocked waiting for timeout")
-
-	})
-
-	// Perform a query that blocks and gets interrupted when the state store
-	// is abandoned.
-	t.Run("blocking query interrupted by abandonCh", func(t *testing.T) {
-		opts := structs.QueryOptions{
-			MinQueryIndex: 3,
-		}
-		var meta structs.QueryMeta
-		var calls int
-		fn := func(_ memdb.WatchSet, _ *state.Store) error {
-			if calls == 0 {
-				meta.Index = 3
-
-				snap, err := s.fsm.Snapshot()
-				if err != nil {
-					t.Fatalf("err: %v", err)
-				}
-				defer snap.Release()
-
-				buf := bytes.NewBuffer(nil)
-				sink := &MockSink{buf, false}
-				if err := snap.Persist(sink); err != nil {
-					t.Fatalf("err: %v", err)
-				}
-
-				if err := s.fsm.Restore(sink); err != nil {
-					t.Fatalf("err: %v", err)
-				}
-			}
-			calls++
-			return nil
-		}
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.NoError(t, err)
-		require.Equal(t, 1, calls)
-	})
 
 	t.Run("ResultsFilteredByACLs is reset for unauthenticated calls", func(t *testing.T) {
 		opts := structs.QueryOptions{
@@ -390,93 +269,6 @@ func TestServer_blockingQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, meta.ResultsFilteredByACLs, "ResultsFilteredByACLs should be honored for authenticated calls")
 	})
-
-	t.Run("non-blocking query for item that does not exist", func(t *testing.T) {
-		opts := structs.QueryOptions{}
-		meta := structs.QueryMeta{}
-		calls := 0
-		fn := func(_ memdb.WatchSet, _ *state.Store) error {
-			calls++
-			return errNotFound
-		}
-
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.NoError(t, err)
-		require.Equal(t, 1, calls)
-	})
-
-	t.Run("blocking query for item that does not exist", func(t *testing.T) {
-		opts := structs.QueryOptions{MinQueryIndex: 3, MaxQueryTime: 100 * time.Millisecond}
-		meta := structs.QueryMeta{}
-		calls := 0
-		fn := func(ws memdb.WatchSet, _ *state.Store) error {
-			calls++
-			if calls == 1 {
-				meta.Index = 3
-
-				ch := make(chan struct{})
-				close(ch)
-				ws.Add(ch)
-				return errNotFound
-			}
-			meta.Index = 5
-			return errNotFound
-		}
-
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.NoError(t, err)
-		require.Equal(t, 2, calls)
-	})
-
-	t.Run("blocking query for item that existed and is removed", func(t *testing.T) {
-		opts := structs.QueryOptions{MinQueryIndex: 3, MaxQueryTime: 100 * time.Millisecond}
-		meta := structs.QueryMeta{}
-		calls := 0
-		fn := func(ws memdb.WatchSet, _ *state.Store) error {
-			calls++
-			if calls == 1 {
-				meta.Index = 3
-
-				ch := make(chan struct{})
-				close(ch)
-				ws.Add(ch)
-				return nil
-			}
-			meta.Index = 5
-			return errNotFound
-		}
-
-		start := time.Now()
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.True(t, time.Since(start) < opts.MaxQueryTime, "query timed out")
-		require.NoError(t, err)
-		require.Equal(t, 2, calls)
-	})
-
-	t.Run("blocking query for non-existent item that is created", func(t *testing.T) {
-		opts := structs.QueryOptions{MinQueryIndex: 3, MaxQueryTime: 100 * time.Millisecond}
-		meta := structs.QueryMeta{}
-		calls := 0
-		fn := func(ws memdb.WatchSet, _ *state.Store) error {
-			calls++
-			if calls == 1 {
-				meta.Index = 3
-
-				ch := make(chan struct{})
-				close(ch)
-				ws.Add(ch)
-				return errNotFound
-			}
-			meta.Index = 5
-			return nil
-		}
-
-		start := time.Now()
-		err := s.blockingQuery(&opts, &meta, fn)
-		require.True(t, time.Since(start) < opts.MaxQueryTime, "query timed out")
-		require.NoError(t, err)
-		require.Equal(t, 2, calls)
-	})
 }
 
 func TestRPC_ReadyForConsistentReads(t *testing.T) {
@@ -498,7 +290,7 @@ func TestRPC_ReadyForConsistentReads(t *testing.T) {
 	}
 
 	s.resetConsistentReadReady()
-	err := s.consistentRead()
+	err := s.ConsistentRead()
 	if err.Error() != "Not ready to serve consistent reads" {
 		t.Fatal("Server should NOT be ready for consistent reads")
 	}
@@ -509,7 +301,7 @@ func TestRPC_ReadyForConsistentReads(t *testing.T) {
 	}()
 
 	retry.Run(t, func(r *retry.R) {
-		if err := s.consistentRead(); err != nil {
+		if err := s.ConsistentRead(); err != nil {
 			r.Fatalf("Expected server to be ready for consistent reads, got error %v", err)
 		}
 	})
@@ -1164,7 +956,7 @@ func TestRPC_LocalTokenStrippedOnForward_GRPC(t *testing.T) {
 
 	var conn *grpc.ClientConn
 	{
-		client, resolverBuilder, balancerBuilder := newClientWithGRPCPlumbing(t, func(c *Config) {
+		client, resolverBuilder := newClientWithGRPCPlumbing(t, func(c *Config) {
 			c.Datacenter = "dc2"
 			c.PrimaryDatacenter = "dc1"
 			c.RPCConfig.EnableStreaming = true
@@ -1176,7 +968,6 @@ func TestRPC_LocalTokenStrippedOnForward_GRPC(t *testing.T) {
 			Servers:               resolverBuilder,
 			DialingFromServer:     false,
 			DialingFromDatacenter: "dc2",
-			BalancerBuilder:       balancerBuilder,
 		})
 
 		conn, err = pool.ClientConn("dc2")
@@ -1287,12 +1078,16 @@ func TestCanRetry(t *testing.T) {
 	config := DefaultConfig()
 	now := time.Now()
 	config.RPCHoldTimeout = 7 * time.Second
+	retryableMessages := []error{
+		ErrChunkingResubmit,
+		rpcRate.ErrRetryElsewhere,
+	}
 	run := func(t *testing.T, tc testCase) {
 		timeOutValue := tc.timeout
 		if timeOutValue.IsZero() {
 			timeOutValue = now
 		}
-		require.Equal(t, tc.expected, canRetry(tc.req, tc.err, timeOutValue, config))
+		require.Equal(t, tc.expected, canRetry(tc.req, tc.err, timeOutValue, config, retryableMessages))
 	}
 
 	var testCases = []testCase{
@@ -1319,7 +1114,7 @@ func TestCanRetry(t *testing.T) {
 		{
 			name:     "ErrRetryLater",
 			err:      fmt.Errorf("some wrapping: %w", rate.ErrRetryLater),
-			expected: true,
+			expected: false,
 		},
 		{
 			name:     "EOF on read request",
@@ -1605,6 +1400,60 @@ func TestRPC_AuthorizeRaftRPC(t *testing.T) {
 			setupCert:   setupConnectCACert("server.dc1.consul"),
 			conn:        useNativeTLS,
 			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			run(t, tc)
+		})
+	}
+}
+
+func TestGetWaitTime(t *testing.T) {
+	type testCase struct {
+		name           string
+		RPCHoldTimeout time.Duration
+		expected       time.Duration
+		retryCount     int
+	}
+	config := DefaultConfig()
+
+	run := func(t *testing.T, tc testCase) {
+		config.RPCHoldTimeout = tc.RPCHoldTimeout
+		require.Equal(t, tc.expected, getWaitTime(config.RPCHoldTimeout, tc.retryCount))
+	}
+
+	var testCases = []testCase{
+		{
+			name:           "init backoff small",
+			RPCHoldTimeout: 7 * time.Millisecond,
+			retryCount:     1,
+			expected:       1 * time.Millisecond,
+		},
+		{
+			name:           "first attempt",
+			RPCHoldTimeout: 7 * time.Second,
+			retryCount:     1,
+			expected:       437 * time.Millisecond,
+		},
+		{
+			name:           "second attempt",
+			RPCHoldTimeout: 7 * time.Second,
+			retryCount:     2,
+			expected:       874 * time.Millisecond,
+		},
+		{
+			name:           "third attempt",
+			RPCHoldTimeout: 7 * time.Second,
+			retryCount:     3,
+			expected:       1748 * time.Millisecond,
+		},
+		{
+			name:           "fourth attempt",
+			RPCHoldTimeout: 7 * time.Second,
+			retryCount:     4,
+			expected:       3496 * time.Millisecond,
 		},
 	}
 

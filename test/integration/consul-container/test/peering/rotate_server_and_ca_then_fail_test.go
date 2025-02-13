@@ -1,8 +1,12 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package peering
 
 import (
 	"context"
 	"encoding/pem"
+	"fmt"
 	"testing"
 	"time"
 
@@ -49,7 +53,14 @@ import (
 func TestPeering_RotateServerAndCAThenFail_(t *testing.T) {
 	t.Parallel()
 
-	accepting, dialing := libtopology.BasicPeeringTwoClustersSetup(t, utils.TargetVersion)
+	accepting, dialing := libtopology.BasicPeeringTwoClustersSetup(t, utils.GetTargetImageName(), utils.TargetVersion,
+		libtopology.PeeringClusterSize{
+			AcceptingNumServers: 3,
+			AcceptingNumClients: 1,
+			DialingNumServers:   1,
+			DialingNumClients:   1,
+		},
+		false)
 	var (
 		acceptingCluster     = accepting.Cluster
 		dialingCluster       = dialing.Cluster
@@ -93,6 +104,7 @@ func TestPeering_RotateServerAndCAThenFail_(t *testing.T) {
 
 		_, port := clientSidecarService.GetAddr()
 		libassert.HTTPServiceEchoes(t, "localhost", port, "")
+		libassert.AssertFortioName(t, fmt.Sprintf("http://localhost:%d", port), libservice.StaticServerServiceName, "")
 	}
 
 	testutil.RunStep(t, "rotate exporting cluster's root CA", func(t *testing.T) {
@@ -142,6 +154,7 @@ func TestPeering_RotateServerAndCAThenFail_(t *testing.T) {
 		// Connectivity should still be contained
 		_, port := clientSidecarService.GetAddr()
 		libassert.HTTPServiceEchoes(t, "localhost", port, "")
+		libassert.AssertFortioName(t, fmt.Sprintf("http://localhost:%d", port), libservice.StaticServerServiceName, "")
 
 		verifySidecarHasTwoRootCAs(t, clientSidecarService)
 	})
@@ -163,6 +176,7 @@ func TestPeering_RotateServerAndCAThenFail_(t *testing.T) {
 
 		_, port := clientSidecarService.GetAddr()
 		libassert.HTTPServiceEchoes(t, "localhost", port, "")
+		libassert.AssertFortioName(t, fmt.Sprintf("http://localhost:%d", port), libservice.StaticServerServiceName, "")
 	})
 }
 
@@ -195,7 +209,7 @@ func verifySidecarHasTwoRootCAs(t *testing.T, sidecar libservice.Service) {
 	}
 
 	retry.RunWith(failer(), t, func(r *retry.R) {
-		dump, err := libassert.GetEnvoyOutput(adminPort, "config_dump", map[string]string{})
+		dump, _, err := libassert.GetEnvoyOutput(adminPort, "config_dump", map[string]string{})
 		require.NoError(r, err, "could not fetch envoy configuration")
 
 		// Make sure there are two certs in the sidecar

@@ -28,6 +28,7 @@ are not supported from commands, but may be from the corresponding HTTP endpoint
 
 | Config Entry Kind   | Required ACL      |
 | ------------------- | ----------------- |
+| api-gateway         | `mesh:read`       |
 | ingress-gateway     | `service:read`    |
 | proxy-defaults      | `<none>`          |
 | service-defaults    | `service:read`    |
@@ -51,7 +52,7 @@ Usage: `consul config read [options]`
 
 #### Enterprise Options
 
-@include 'http_api_partition_options.mdx'
+@include 'cli-http-api-partition-options.mdx'
 
 @include 'http_api_namespace_options.mdx'
 

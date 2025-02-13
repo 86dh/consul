@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 
 # retry based on
 # https://github.com/fernandoacorreia/azure-docker-registry/blob/master/tools/scripts/create-registry-server
@@ -44,6 +47,25 @@ function retry_default {
 
 function retry_long {
   retry 30 1 "$@"
+}
+
+# assert_upstream_message asserts both the returned code
+# and message from upstream service
+function assert_upstream_message {
+  local HOSTPORT=$1
+  run curl -s -d hello localhost:$HOSTPORT
+
+  if [ "$status" -ne 0 ]; then
+    echo "Command failed"
+    return 1
+  fi
+
+  if (echo $output | grep 'hello'); then
+    return 0
+  fi
+
+  echo "expected message not found in $output"
+  return 1
 }
 
 function is_set {
@@ -128,6 +150,20 @@ function assert_cert_signed_by_ca {
   echo "$CERT" | grep 'Verify return code: 0 (ok)'
 }
 
+function assert_cert_has_cn {
+  local HOSTPORT=$1
+  local CN=$2
+  local SERVER_NAME=${3:-$CN}
+
+  CERT=$(openssl s_client -connect $HOSTPORT -servername $SERVER_NAME -showcerts </dev/null 2>/dev/null)
+
+  echo "WANT CN: ${CN} (SNI: ${SERVER_NAME})"
+  echo "GOT CERT:"
+  echo "$CERT"
+
+  echo "$CERT" | grep "CN = ${CN}"
+}
+
 function assert_envoy_version {
   local ADMINPORT=$1
   run retry_default curl -f -s localhost:$ADMINPORT/server_info
@@ -145,16 +181,6 @@ function assert_envoy_version {
   echo "---"
   echo "Got version=$VERSION"
   echo "Want version=$ENVOY_VERSION"
-
-  # 1.20.2, 1.19.3 and 1.18.6 are special snowflakes in that the version for
-  # the release is reported with a '-dev' suffix (eg 1.20.2-dev).
-  if [ "$ENVOY_VERSION" = "1.20.2" ]; then
-    ENVOY_VERSION="1.20.2-dev"
-  elif [ "$ENVOY_VERSION" = "1.19.3" ]; then
-    ENVOY_VERSION="1.19.3-dev"
-  elif [ "$ENVOY_VERSION" = "1.18.6" ]; then
-    ENVOY_VERSION="1.18.6-dev"
-  fi
 
   echo $VERSION | grep "/$ENVOY_VERSION/"
 }
@@ -174,7 +200,7 @@ function assert_envoy_expose_checks_listener_count {
   RANGES=$(echo "$BODY" | jq '.active_state.listener.filter_chains[0].filter_chain_match.source_prefix_ranges | length')
   echo "RANGES = $RANGES (expect 3)"
   # note: if IPv6 is not supported in the kernel per
-  # agent/xds:kernelSupportsIPv6() then this will only be 2
+  # agent/xds/platform:SupportsIPv6() then this will only be 2
   [ "${RANGES:-0}" -eq 3 ]
 
   HCM=$(echo "$BODY" | jq '.active_state.listener.filter_chains[0].filters[0]')
@@ -190,6 +216,13 @@ function get_envoy_expose_checks_listener_once {
   run curl -s -f $HOSTPORT/config_dump
   [ "$status" -eq 0 ]
   echo "$output" | jq --raw-output '.configs[] | select(.["@type"] == "type.googleapis.com/envoy.admin.v3.ListenersConfigDump") | .dynamic_listeners[] | select(.name | startswith("exposed_path_"))'
+}
+
+function get_envoy_public_listener_once {
+  local HOSTPORT=$1
+  run curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output '.configs[] | select(.["@type"] == "type.googleapis.com/envoy.admin.v3.ListenersConfigDump") | .dynamic_listeners[] | select(.name | startswith("public_listener:"))'
 }
 
 function assert_envoy_http_rbac_policy_count {
@@ -222,6 +255,14 @@ function get_envoy_network_rbac_once {
   run curl -s -f $HOSTPORT/config_dump
   [ "$status" -eq 0 ]
   echo "$output" | jq --raw-output '.configs[2].dynamic_listeners[].active_state.listener.filter_chains[0].filters[] | select(.name == "envoy.filters.network.rbac") | .typed_config'
+}
+
+function get_envoy_http_filter {
+  local HOSTPORT=$1
+  local FILTER_NAME=$2
+  run retry_default curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output ".configs[2].dynamic_listeners[] | .active_state.listener.filter_chains[].filters[] | select(.name == \"envoy.filters.network.http_connection_manager\") | .typed_config.http_filters[] | select(.name == \"${FILTER_NAME}\")"
 }
 
 function get_envoy_listener_filters {
@@ -277,6 +318,19 @@ function get_envoy_cluster_config {
   "
 }
 
+function get_envoy_endpoints_configs {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  run retry_default curl -s -f $HOSTPORT/config_dump?include_eds=on
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output "
+    .configs[]
+    | select(.\"@type\" == \"type.googleapis.com/envoy.admin.v3.EndpointsConfigDump\")
+    | .dynamic_endpoint_configs[]
+    | .endpoint_config
+  "
+}
+
 function get_envoy_stats_flush_interval {
   local HOSTPORT=$1
   run retry_default curl -s -f $HOSTPORT/config_dump
@@ -293,7 +347,7 @@ function snapshot_envoy_admin {
   local OUTDIR="${LOG_DIR}/envoy-snapshots/${DC}/${ENVOY_NAME}"
 
   mkdir -p "${OUTDIR}"
-  docker_wget "$DC" "http://${HOSTPORT}/config_dump" -q -O - >"${OUTDIR}/config_dump.json"
+  docker_wget "$DC" "http://${HOSTPORT}/config_dump?include_eds=on" -q -O - >"${OUTDIR}/config_dump.json"
   docker_wget "$DC" "http://${HOSTPORT}/clusters?format=json" -q -O - >"${OUTDIR}/clusters.json"
   docker_wget "$DC" "http://${HOSTPORT}/stats" -q -O - >"${OUTDIR}/stats.txt"
   docker_wget "$DC" "http://${HOSTPORT}/stats/prometheus" -q -O - >"${OUTDIR}/stats_prometheus.txt"
@@ -318,6 +372,49 @@ function get_envoy_metrics {
   get_all_envoy_metrics $HOSTPORT | grep "$METRICS"
 }
 
+function get_upstream_endpoint {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  run curl -s -f "http://${HOSTPORT}/clusters?format=json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output "
+.cluster_statuses[]
+| select(.name|startswith(\"${CLUSTER_NAME}\"))"
+}
+
+function get_upstream_endpoint_port {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  local PORT_VALUE=$3
+  run curl -s -f "http://${HOSTPORT}/clusters?format=json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output "
+.cluster_statuses[]
+| select(.name|startswith(\"${CLUSTER_NAME}\"))
+| [.host_statuses[].address.socket_address.port_value]
+| [select(.[] == ${PORT_VALUE})]
+| length"
+}
+
+function assert_upstream_has_endpoint_port_once {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  local PORT_VALUE=$3
+
+  GOT_COUNT=$(get_upstream_endpoint_port $HOSTPORT $CLUSTER_NAME $PORT_VALUE)
+
+  [ "$GOT_COUNT" -eq 1 ]
+}
+
+function assert_upstream_has_endpoint_port {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  local PORT_VALUE=$3
+
+  run retry_long assert_upstream_has_endpoint_port_once $HOSTPORT $CLUSTER_NAME $PORT_VALUE
+  [ "$status" -eq 0 ]
+}
+
 function get_upstream_endpoint_in_status_count {
   local HOSTPORT=$1
   local CLUSTER_NAME=$2
@@ -340,7 +437,27 @@ function assert_upstream_has_endpoints_in_status_once {
 
   GOT_COUNT=$(get_upstream_endpoint_in_status_count $HOSTPORT $CLUSTER_NAME $HEALTH_STATUS)
 
+  echo "GOT: $GOT_COUNT"
   [ "$GOT_COUNT" -eq $EXPECT_COUNT ]
+}
+
+function assert_upstream_missing_once {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  
+  run get_upstream_endpoint $HOSTPORT $CLUSTER_NAME
+  [ "$status" -eq 0 ]
+  echo "$output"
+  [ "" == "$output" ]
+}
+
+function assert_upstream_missing {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  run retry_long assert_upstream_missing_once $HOSTPORT $CLUSTER_NAME
+  echo "OUTPUT: $output $status"
+
+  [ "$status" -eq 0 ]
 }
 
 function assert_upstream_has_endpoints_in_status {
@@ -349,6 +466,8 @@ function assert_upstream_has_endpoints_in_status {
   local HEALTH_STATUS=$3
   local EXPECT_COUNT=$4
   run retry_long assert_upstream_has_endpoints_in_status_once $HOSTPORT $CLUSTER_NAME $HEALTH_STATUS $EXPECT_COUNT
+  echo "$output"
+
   [ "$status" -eq 0 ]
 }
 
@@ -533,7 +652,7 @@ function docker_consul_for_proxy_bootstrap {
 function docker_wget {
   local DC=$1
   shift 1
-  docker run --rm --network container:envoy_consul-${DC}_1 docker.mirror.hashicorp.services/alpine:3.9 wget "$@"
+  docker run --rm --network container:envoy_consul-${DC}_1 docker.mirror.hashicorp.services/alpine:3.20 wget "$@"
 }
 
 function docker_curl {
@@ -642,17 +761,13 @@ function must_fail_http_connection {
 }
 
 # must_pass_http_request allows you to craft a specific http request to assert
-# that envoy will NOT reject the request. Primarily of use for testing L7
-# intentions.
+# that envoy will NOT reject the request.
 function must_pass_http_request {
   local METHOD=$1
   local URL=$2
-  local DEBUG_HEADER_VALUE="${3:-""}"
+  shift 2
 
   local extra_args
-  if [[ -n "${DEBUG_HEADER_VALUE}" ]]; then
-    extra_args="-H x-test-debug:${DEBUG_HEADER_VALUE}"
-  fi
   case "$METHOD" in
   GET) ;;
 
@@ -667,22 +782,25 @@ function must_pass_http_request {
     ;;
   esac
 
+  # Treat any remaining args as header KVs
+  for HEADER_ARG in "$@"; do
+    extra_args="$extra_args -H ${HEADER_ARG}"
+  done
+
   run curl --no-keepalive -v -s -f $extra_args "$URL"
   [ "$status" == 0 ]
 }
 
 # must_fail_http_request allows you to craft a specific http request to assert
-# that envoy will reject the request. Primarily of use for testing L7
-# intentions.
+# that envoy will reject the request. Must supply the expected status code before
+# method and URL.
 function must_fail_http_request {
-  local METHOD=$1
-  local URL=$2
-  local DEBUG_HEADER_VALUE="${3:-""}"
+  local EXPECT_RESPONSE=$1
+  local METHOD=$2
+  local URL=$3
+  shift 2
 
   local extra_args
-  if [[ -n "${DEBUG_HEADER_VALUE}" ]]; then
-    extra_args="-H x-test-debug:${DEBUG_HEADER_VALUE}"
-  fi
   case "$METHOD" in
   HEAD)
     extra_args="$extra_args -I"
@@ -700,12 +818,42 @@ function must_fail_http_request {
     ;;
   esac
 
+  # Treat any remaining args as header KVs
+  for HEADER_ARG in "$@"; do
+    extra_args="$extra_args -H ${HEADER_ARG}"
+  done
+
   # Attempt to curl through upstream
   run curl --no-keepalive -s -i $extra_args "$URL"
 
   echo "OUTPUT $output"
 
-  echo "$output" | grep "403 Forbidden"
+  # Output of curl should include status code immediately after 'HTTP/1.1'
+  echo "$output" | grep "HTTP/1.1 $EXPECT_RESPONSE"
+}
+
+# Gets the JSON response containing request parameters from the echo service response.
+# See https://github.com/mendhak/docker-http-https-echo?tab=readme-ov-file#screenshots
+# for example response body.
+# Requires SERVICE_CONTAINER=echo.
+function get_echo_output {
+  # Take the JSON response from $output, starting with first line containing only '{'
+  # and ending with the next line containing only '}'.
+  # The first sed converts a trailing '}* <some text...>' (curl -v output) to just '}'.
+  local json=$(echo "$output" | sed 's/}\*.*/}/' | sed -n -e '/^{$/,/^}$/{ p; }')
+  echo $json | jq -r '.' || echo "Output did not contain valid JSON: $output" >&3
+}
+
+# Gets the value of the raw request path from the echo service response.
+# Requires SERVICE_CONTAINER=echo.
+function get_echo_request_path {
+  get_echo_output | jq -r '.path'
+}
+
+# Gets the value of a given request header from the echo service response.
+# Requires SERVICE_CONTAINER=echo.
+function get_echo_request_header_value {
+  get_echo_output | jq -r ".headers.$1"
 }
 
 function gen_envoy_bootstrap {
@@ -759,6 +907,21 @@ function upsert_config_entry {
   local BODY="$2"
 
   echo "$BODY" | docker_consul "$DC" config write -
+}
+
+function assert_config_entry_status {
+  local TYPE="$1"
+  local STATUS="$2"
+  local REASON="$3"
+  local DC="$4"
+  local KIND="$5"
+  local NAME="$6"
+  local NS=${7:-}
+  local AP=${8:-}
+  local PEER=${9:-}
+
+  status=$(curl -s -f "consul-${DC}-client:8500/v1/config/${KIND}/${NAME}?passing&ns=${NS}&partition=${AP}&peer=${PEER}" | jq ".Status.Conditions[] | select(.Type == \"$TYPE\" and .Status == \"$STATUS\" and .Reason == \"$REASON\")")
+  [ -n "$status" ]
 }
 
 function delete_config_entry {
@@ -962,15 +1125,6 @@ function assert_service_has_imported {
   fi
 }
 
-function get_lambda_envoy_http_filter {
-  local HOSTPORT=$1
-  local NAME_PREFIX=$2
-  run retry_default curl -s -f $HOSTPORT/config_dump
-  [ "$status" -eq 0 ]
-  # get the full http filter object so the individual fields can be validated.
-  echo "$output" | jq --raw-output ".configs[2].dynamic_listeners[] | .active_state.listener.filter_chains[].filters[] | select(.name == \"envoy.filters.network.http_connection_manager\") | .typed_config.http_filters[] | select(.name == \"envoy.filters.http.aws_lambda\") | .typed_config"
-}
-
 function register_lambdas {
   local DC=${1:-primary}
   # register lambdas to the catalog
@@ -998,13 +1152,12 @@ function assert_lambda_envoy_dynamic_cluster_exists {
 
 function assert_lambda_envoy_dynamic_http_filter_exists {
   local HOSTPORT=$1
-  local NAME_PREFIX=$2
-  local ARN=$3
+  local ARN=$2
 
-  local FILTER=$(get_lambda_envoy_http_filter $HOSTPORT $NAME_PREFIX)
+  local FILTER=$(get_envoy_http_filter $HOSTPORT 'envoy.filters.http.aws_lambda')
   [ -n "$FILTER" ]
 
-  [ "$(echo $FILTER | jq -r '.arn')" == "$ARN" ]
+  [ "$(echo $FILTER | jq -r '.typed_config | .arn')" == "$ARN" ]
 }
 
 function varsub {

@@ -1,14 +1,19 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package submatview
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
 
+	"github.com/hashicorp/consul/agent/consul/stream"
 	"github.com/hashicorp/consul/lib/retry"
-	"github.com/hashicorp/consul/proto/pbsubscribe"
+	"github.com/hashicorp/consul/proto/private/pbsubscribe"
 )
 
 // View receives events from, and return results to, Materializer. A view is
@@ -199,7 +204,12 @@ func (m *materializer) handleError(req *pbsubscribe.SubscribeRequest, err error)
 		logger = logger.With("key", req.Key) // nolint:staticcheck // SA1019 intentional use of deprecated field
 	}
 
-	logger.Error("subscribe call failed")
+	switch {
+	case errors.Is(err, stream.ErrACLChanged):
+		logger.Info("subscribe call failed due to ACL change", "error", err)
+	default:
+		logger.Error("subscribe call failed", "error", err)
+	}
 }
 
 // isNonTemporaryOrConsecutiveFailure returns true if the error is not a
