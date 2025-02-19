@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
@@ -41,7 +44,7 @@ var ACLSummaries = []prometheus.SummaryDefinition{
 
 // These must be kept in sync with the constants in command/agent/acl.go.
 const (
-	// anonymousToken is the token ID we re-write to if there is no token ID
+	// anonymousToken is the token SecretID we re-write to if there is no token ID
 	// provided.
 	anonymousToken = "anonymous"
 
@@ -96,6 +99,10 @@ func (id *missingIdentity) ServiceIdentityList() []*structs.ACLServiceIdentity {
 }
 
 func (id *missingIdentity) NodeIdentityList() []*structs.ACLNodeIdentity {
+	return nil
+}
+
+func (id *missingIdentity) TemplatedPolicyList() []*structs.ACLTemplatedPolicy {
 	return nil
 }
 
@@ -214,6 +221,34 @@ type ACLResolverSettings struct {
 	ACLDefaultPolicy string
 }
 
+func (a ACLResolverSettings) CheckACLs() error {
+	switch a.ACLDefaultPolicy {
+	case "allow":
+	case "deny":
+	default:
+		return fmt.Errorf("Unsupported default ACL policy: %s", a.ACLDefaultPolicy)
+	}
+	switch a.ACLDownPolicy {
+	case "allow":
+	case "deny":
+	case "async-cache", "extend-cache":
+	default:
+		return fmt.Errorf("Unsupported down ACL policy: %s", a.ACLDownPolicy)
+	}
+	return nil
+}
+
+func (s ACLResolverSettings) IsDefaultAllow() (bool, error) {
+	switch s.ACLDefaultPolicy {
+	case "allow":
+		return true, nil
+	case "deny":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected ACL default policy value of %q", s.ACLDefaultPolicy)
+	}
+}
+
 // ACLResolver is the type to handle all your token and policy resolution needs.
 //
 // Supports:
@@ -284,7 +319,7 @@ func agentRecoveryAuthorizer(nodeName string, entMeta *acl.EnterpriseMeta, aclCo
 	node_prefix "" {
 		policy = "read"
 	}
-	`, nodeName), acl.SyntaxCurrent, &conf, entMeta.ToEnterprisePolicyMeta())
+	`, nodeName), &conf, entMeta.ToEnterprisePolicyMeta())
 	if err != nil {
 		return nil, err
 	}
@@ -593,9 +628,11 @@ func (r *ACLResolver) resolvePoliciesForIdentity(identity structs.ACLIdentity) (
 		roleIDs           = identity.RoleIDs()
 		serviceIdentities = structs.ACLServiceIdentities(identity.ServiceIdentityList())
 		nodeIdentities    = structs.ACLNodeIdentities(identity.NodeIdentityList())
+		templatedPolicies = structs.ACLTemplatedPolicies(identity.TemplatedPolicyList())
 	)
 
-	if len(policyIDs) == 0 && len(serviceIdentities) == 0 && len(roleIDs) == 0 && len(nodeIdentities) == 0 {
+	if len(policyIDs) == 0 && len(serviceIdentities) == 0 &&
+		len(roleIDs) == 0 && len(nodeIdentities) == 0 && len(templatedPolicies) == 0 {
 		// In this case the default policy will be all that is in effect.
 		return nil, nil
 	}
@@ -613,16 +650,19 @@ func (r *ACLResolver) resolvePoliciesForIdentity(identity structs.ACLIdentity) (
 		}
 		serviceIdentities = append(serviceIdentities, role.ServiceIdentities...)
 		nodeIdentities = append(nodeIdentities, role.NodeIdentityList()...)
+		templatedPolicies = append(templatedPolicies, role.TemplatedPolicyList()...)
 	}
 
 	// Now deduplicate any policies or service identities that occur more than once.
 	policyIDs = dedupeStringSlice(policyIDs)
 	serviceIdentities = serviceIdentities.Deduplicate()
 	nodeIdentities = nodeIdentities.Deduplicate()
+	templatedPolicies = templatedPolicies.Deduplicate()
 
 	// Generate synthetic policies for all service identities in effect.
 	syntheticPolicies := r.synthesizePoliciesForServiceIdentities(serviceIdentities, identity.EnterpriseMetadata())
 	syntheticPolicies = append(syntheticPolicies, r.synthesizePoliciesForNodeIdentities(nodeIdentities, identity.EnterpriseMetadata())...)
+	syntheticPolicies = append(syntheticPolicies, r.synthesizePoliciesForTemplatedPolicies(templatedPolicies, identity.EnterpriseMetadata())...)
 
 	// For the new ACLs policy replication is mandatory for correct operation on servers. Therefore
 	// we only attempt to resolve policies locally
@@ -661,6 +701,24 @@ func (r *ACLResolver) synthesizePoliciesForNodeIdentities(nodeIdentities []*stru
 	syntheticPolicies := make([]*structs.ACLPolicy, 0, len(nodeIdentities))
 	for _, n := range nodeIdentities {
 		syntheticPolicies = append(syntheticPolicies, n.SyntheticPolicy(entMeta))
+	}
+
+	return syntheticPolicies
+}
+
+func (r *ACLResolver) synthesizePoliciesForTemplatedPolicies(templatedPolicies []*structs.ACLTemplatedPolicy, entMeta *acl.EnterpriseMeta) []*structs.ACLPolicy {
+	if len(templatedPolicies) == 0 {
+		return nil
+	}
+
+	syntheticPolicies := make([]*structs.ACLPolicy, 0, len(templatedPolicies))
+	for _, tp := range templatedPolicies {
+		policy, err := tp.SyntheticPolicy(entMeta)
+		if err != nil {
+			r.logger.Warn(fmt.Sprintf("could not generate synthetic policy for templated policy: %q", tp.TemplateName), "error", err)
+			continue
+		}
+		syntheticPolicies = append(syntheticPolicies, policy)
 	}
 
 	return syntheticPolicies
@@ -994,34 +1052,34 @@ func (r *ACLResolver) resolveLocallyManagedToken(token string) (structs.ACLIdent
 }
 
 // ResolveToken to an acl.Authorizer and structs.ACLIdentity. The acl.Authorizer
-// can be used to check permissions granted to the token, and the ACLIdentity
-// describes the token and any defaults applied to it.
-func (r *ACLResolver) ResolveToken(token string) (resolver.Result, error) {
+// can be used to check permissions granted to the token using its secret, and the
+// ACLIdentity describes the token and any defaults applied to it.
+func (r *ACLResolver) ResolveToken(tokenSecretID string) (resolver.Result, error) {
 	if !r.ACLsEnabled() {
 		return resolver.Result{Authorizer: acl.ManageAll()}, nil
 	}
 
-	if acl.RootAuthorizer(token) != nil {
+	if acl.RootAuthorizer(tokenSecretID) != nil {
 		return resolver.Result{}, acl.ErrRootDenied
 	}
 
 	// handle the anonymous token
-	if token == "" {
-		token = anonymousToken
+	if tokenSecretID == "" {
+		tokenSecretID = anonymousToken
 	}
 
-	if ident, authz, ok := r.resolveLocallyManagedToken(token); ok {
+	if ident, authz, ok := r.resolveLocallyManagedToken(tokenSecretID); ok {
 		return resolver.Result{Authorizer: authz, ACLIdentity: ident}, nil
 	}
 
 	defer metrics.MeasureSince([]string{"acl", "ResolveToken"}, time.Now())
 
-	identity, policies, err := r.resolveTokenToIdentityAndPolicies(token)
+	identity, policies, err := r.resolveTokenToIdentityAndPolicies(tokenSecretID)
 	if err != nil {
 		r.handleACLDisabledError(err)
 		if IsACLRemoteError(err) {
 			r.logger.Error("Error resolving token", "error", err)
-			ident := &missingIdentity{reason: "primary-dc-down", token: token}
+			ident := &missingIdentity{reason: "primary-dc-down", token: tokenSecretID}
 			return resolver.Result{Authorizer: r.down, ACLIdentity: ident}, nil
 		}
 
@@ -1074,11 +1132,11 @@ func (r *ACLResolver) ACLsEnabled() bool {
 }
 
 func (r *ACLResolver) ResolveTokenAndDefaultMeta(
-	token string,
+	tokenSecretID string,
 	entMeta *acl.EnterpriseMeta,
 	authzContext *acl.AuthorizerContext,
 ) (resolver.Result, error) {
-	result, err := r.ResolveToken(token)
+	result, err := r.ResolveToken(tokenSecretID)
 	if err != nil {
 		return resolver.Result{}, err
 	}
@@ -1119,9 +1177,9 @@ func filterACLWithAuthorizer(logger hclog.Logger, authorizer acl.Authorizer, sub
 // filterACL uses the ACLResolver to resolve the token in an acl.Authorizer,
 // then uses the acl.Authorizer to filter subj. Any entities in subj that are
 // not authorized for read access will be removed from subj.
-func filterACL(r *ACLResolver, token string, subj interface{}) error {
+func filterACL(r *ACLResolver, tokenSecretID string, subj interface{}) error {
 	// Get the ACL from the token
-	authorizer, err := r.ResolveToken(token)
+	authorizer, err := r.ResolveToken(tokenSecretID)
 	if err != nil {
 		return err
 	}

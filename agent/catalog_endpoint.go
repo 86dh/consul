@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package agent
 
 import (
@@ -5,11 +8,12 @@ import (
 	"net/http"
 	"strings"
 
-	metrics "github.com/armon/go-metrics"
+	"github.com/armon/go-metrics"
 	"github.com/armon/go-metrics/prometheus"
 
 	cachetype "github.com/hashicorp/consul/agent/cache-types"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/internal/dnsutil"
 )
 
 var CatalogCounters = []prometheus.CounterDefinition{
@@ -254,7 +258,7 @@ RETRY_ONCE:
 	}
 	out.ConsistencyLevel = args.QueryOptions.ConsistencyLevel()
 
-	s.agent.TranslateAddresses(args.Datacenter, out.Nodes, TranslateAddressAcceptAny)
+	s.agent.TranslateAddresses(args.Datacenter, out.Nodes, dnsutil.TranslateAddressAcceptAny)
 
 	// Use empty list instead of nil
 	if out.Nodes == nil {
@@ -400,7 +404,7 @@ func (s *HTTPHandlers) catalogServiceNodes(resp http.ResponseWriter, req *http.R
 	}
 
 	out.ConsistencyLevel = args.QueryOptions.ConsistencyLevel()
-	s.agent.TranslateAddresses(args.Datacenter, out.ServiceNodes, TranslateAddressAcceptAny)
+	s.agent.TranslateAddresses(args.Datacenter, out.ServiceNodes, dnsutil.TranslateAddressAcceptAny)
 
 	// Use empty list instead of nil
 	if out.ServiceNodes == nil {
@@ -454,7 +458,7 @@ RETRY_ONCE:
 	}
 	out.ConsistencyLevel = args.QueryOptions.ConsistencyLevel()
 	if out.NodeServices != nil {
-		s.agent.TranslateAddresses(args.Datacenter, out.NodeServices, TranslateAddressAcceptAny)
+		s.agent.TranslateAddresses(args.Datacenter, out.NodeServices, dnsutil.TranslateAddressAcceptAny)
 	}
 
 	// TODO: The NodeServices object in IndexedNodeServices is a pointer to
@@ -518,7 +522,7 @@ RETRY_ONCE:
 		goto RETRY_ONCE
 	}
 	out.ConsistencyLevel = args.QueryOptions.ConsistencyLevel()
-	s.agent.TranslateAddresses(args.Datacenter, &out.NodeServices, TranslateAddressAcceptAny)
+	s.agent.TranslateAddresses(args.Datacenter, &out.NodeServices, dnsutil.TranslateAddressAcceptAny)
 
 	// Use empty list instead of nil
 	for _, s := range out.NodeServices.Services {
@@ -569,4 +573,35 @@ RETRY_ONCE:
 	metrics.IncrCounterWithLabels([]string{"client", "api", "success", "catalog_gateway_services"}, 1,
 		s.nodeMetricsLabels())
 	return out.Services, nil
+}
+
+func (s *HTTPHandlers) AssignManualServiceVIPs(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
+	metrics.IncrCounterWithLabels([]string{"client", "api", "service_virtual_ips"}, 1,
+		s.nodeMetricsLabels())
+
+	var args structs.AssignServiceManualVIPsRequest
+	if err := s.parseEntMetaNoWildcard(req, &args.EnterpriseMeta); err != nil {
+		return nil, err
+	}
+
+	if err := s.rewordUnknownEnterpriseFieldError(decodeBody(req.Body, &args)); err != nil {
+		return nil, HTTPError{StatusCode: http.StatusBadRequest, Reason: fmt.Sprintf("Request decode failed: %v", err)}
+	}
+
+	// Setup the default DC if not provided
+	if args.Datacenter == "" {
+		args.Datacenter = s.agent.config.Datacenter
+	}
+	s.parseToken(req, &args.Token)
+
+	// Forward to the servers
+	var out structs.AssignServiceManualVIPsResponse
+	if err := s.agent.RPC(req.Context(), "Internal.AssignManualServiceVIPs", &args, &out); err != nil {
+		metrics.IncrCounterWithLabels([]string{"client", "rpc", "error", "service_virtual_ips"}, 1,
+			s.nodeMetricsLabels())
+		return nil, err
+	}
+	metrics.IncrCounterWithLabels([]string{"client", "api", "success", "service_virtual_ips"}, 1,
+		s.nodeMetricsLabels())
+	return out, nil
 }

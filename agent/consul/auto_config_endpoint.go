@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package consul
 
 import (
@@ -8,17 +11,17 @@ import (
 	"regexp"
 
 	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/internal/dnsutil"
 
 	bexpr "github.com/hashicorp/go-bexpr"
 
 	"github.com/hashicorp/consul/agent/connect"
 	"github.com/hashicorp/consul/agent/consul/authmethod/ssoauth"
-	"github.com/hashicorp/consul/agent/dns"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/lib/template"
-	"github.com/hashicorp/consul/proto/pbautoconf"
-	"github.com/hashicorp/consul/proto/pbconfig"
-	"github.com/hashicorp/consul/proto/pbconnect"
+	"github.com/hashicorp/consul/proto/private/pbautoconf"
+	"github.com/hashicorp/consul/proto/private/pbconfig"
+	"github.com/hashicorp/consul/proto/private/pbconnect"
 	"github.com/hashicorp/consul/tlsutil"
 )
 
@@ -77,7 +80,7 @@ func (a *jwtAuthorizer) Authorize(req *pbautoconf.AutoConfigRequest) (AutoConfig
 	if invalidSegmentName.MatchString(req.Segment) {
 		return AutoConfigOptions{}, fmt.Errorf("Invalid request field. %v = `%v`", "segment", req.Segment)
 	}
-	if req.Partition != "" && !dns.IsValidLabel(req.Partition) {
+	if req.Partition != "" && !dnsutil.IsValidLabel(req.Partition) {
 		return AutoConfigOptions{}, fmt.Errorf("Invalid request field. %v = `%v`", "partition", req.Partition)
 	}
 

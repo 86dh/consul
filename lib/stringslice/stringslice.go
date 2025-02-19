@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package stringslice
 
 // StrContains => Contains
@@ -76,4 +79,18 @@ func CloneStringSlice(s []string) []string {
 	out := make([]string, len(s))
 	copy(out, s)
 	return out
+}
+
+// EqualMapKeys returns true if the slice equals the keys of
+// the map ignoring any ordering.
+func EqualMapKeys[V any](a []string, b map[string]V) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, ip := range a {
+		if _, ok := b[ip]; !ok {
+			return false
+		}
+	}
+	return true
 }

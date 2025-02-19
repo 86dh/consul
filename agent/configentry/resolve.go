@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package configentry
 
 import (
@@ -12,8 +15,6 @@ import (
 
 func ComputeResolvedServiceConfig(
 	args *structs.ServiceConfigRequest,
-	upstreamIDs []structs.ServiceID,
-	legacyUpstreams bool,
 	entries *ResolvedServiceConfigSet,
 	logger hclog.Logger,
 ) (*structs.ServiceConfigResponse, error) {
@@ -23,16 +24,19 @@ func ComputeResolvedServiceConfig(
 
 	// Store the upstream defaults under a wildcard key so that they can be applied to
 	// upstreams that are inferred from intentions and do not have explicit upstream configuration.
-	wildcard := structs.NewServiceID(structs.WildcardSpecifier, args.WithWildcardNamespace())
+	wildcard := structs.PeeredServiceName{
+		ServiceName: structs.NewServiceName(structs.WildcardSpecifier, args.WithWildcardNamespace()),
+	}
 	wildcardUpstreamDefaults := make(map[string]interface{})
 	// resolvedConfigs stores the opaque config map for each upstream and is keyed on the upstream's ID.
-	resolvedConfigs := make(map[structs.ServiceID]map[string]interface{})
+	resolvedConfigs := make(map[structs.PeeredServiceName]map[string]interface{})
 
 	// TODO(freddy) Refactor this into smaller set of state store functions
 	// Pass the WatchSet to both the service and proxy config lookups. If either is updated during the
 	// blocking query, this function will be rerun and these state store lookups will both be current.
 	// We use the default enterprise meta to look up the global proxy defaults because they are not namespaced.
 
+	var proxyConfGlobalProtocol string
 	proxyConf := entries.GetProxyDefaults(args.PartitionOrDefault())
 	if proxyConf != nil {
 		// Apply the proxy defaults to the sidecar's proxy config
@@ -44,6 +48,7 @@ func ComputeResolvedServiceConfig(
 		thisReply.ProxyConfig = mapCopy.(map[string]interface{})
 		thisReply.Mode = proxyConf.Mode
 		thisReply.TransparentProxy = proxyConf.TransparentProxy
+		thisReply.MutualTLSMode = proxyConf.MutualTLSMode
 		thisReply.MeshGateway = proxyConf.MeshGateway
 		thisReply.Expose = proxyConf.Expose
 		thisReply.EnvoyExtensions = proxyConf.EnvoyExtensions
@@ -59,9 +64,30 @@ func ComputeResolvedServiceConfig(
 		if !proxyConf.MeshGateway.IsZero() {
 			wildcardUpstreamDefaults["mesh_gateway"] = proxyConf.MeshGateway
 		}
-		if protocol, ok := thisReply.ProxyConfig["protocol"]; ok {
-			wildcardUpstreamDefaults["protocol"] = protocol
+
+		// We explicitly DO NOT merge the protocol from proxy-defaults into the wildcard upstream here.
+		// TProxy will try to use the data from the `wildcardUpstreamDefaults` as a source of truth, which is
+		// normally correct to inherit from proxy-defaults. However, it is NOT correct for protocol.
+		//
+		// This edge-case is different for `protocol` from other fields, since the protocol can be
+		// set on both the local `ServiceDefaults.UpstreamOverrides` and upstream `ServiceDefaults.Protocol`.
+		// This means that when proxy-defaults is set, it would always be treated as an explicit override,
+		// and take precedence over the protocol that is set on the discovery chain (which comes from the
+		// service's preference in its service-defaults), which is wrong.
+		//
+		// When the upstream is not explicitly defined, we should only get the protocol from one of these locations:
+		//   1. For tproxy non-peering services, it can be fetched via the discovery chain.
+		//      The chain compiler merges the proxy-defaults protocol with the upstream's preferred service-defaults protocol.
+		//   2. For tproxy non-peering services with default upstream overrides, it will come from the wildcard upstream overrides.
+		//   3. For tproxy non-peering services with specific upstream overrides, it will come from the specific upstream override defined.
+		//   4. For tproxy peering services, they do not honor the proxy-defaults, since they reside in a different cluster.
+		//      The data will come from a separate peerMeta field.
+		// In all of these cases, it is not necessary for the proxy-defaults to exist in the wildcard upstream.
+		parsed, err := structs.ParseUpstreamConfigNoDefaults(mapCopy.(map[string]interface{}))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse upstream config map for proxy-defaults: %v", err)
 		}
+		proxyConfGlobalProtocol = parsed.Protocol
 	}
 
 	serviceConf := entries.GetServiceDefaults(
@@ -91,6 +117,9 @@ func ComputeResolvedServiceConfig(
 		if serviceConf.Destination != nil {
 			thisReply.Destination = *serviceConf.Destination
 		}
+		if serviceConf.RateLimits != nil {
+			thisReply.RateLimits = *serviceConf.RateLimits
+		}
 
 		// Populate values for the proxy config map
 		proxyConf := thisReply.ProxyConfig
@@ -117,6 +146,10 @@ func ComputeResolvedServiceConfig(
 			thisReply.ProxyConfig = proxyConf
 		}
 
+		if serviceConf.MutualTLSMode != structs.MutualTLSModeDefault {
+			thisReply.MutualTLSMode = serviceConf.MutualTLSMode
+		}
+
 		thisReply.Meta = serviceConf.Meta
 		// Service defaults' envoy extensions are appended to the proxy defaults extensions so that proxy defaults
 		// extensions are applied first.
@@ -127,10 +160,10 @@ func ComputeResolvedServiceConfig(
 	// Upstreams can come from:
 	// - Explicitly from proxy registrations, and therefore as an argument to this RPC endpoint
 	// - Implicitly from centralized upstream config in service-defaults
-	seenUpstreams := map[structs.ServiceID]struct{}{}
+	seenUpstreams := map[structs.PeeredServiceName]struct{}{}
 
 	var (
-		noUpstreamArgs = len(upstreamIDs) == 0 && len(args.Upstreams) == 0
+		noUpstreamArgs = len(args.UpstreamServiceNames) == 0
 
 		// Check the args and the resolved value. If it was exclusively set via a config entry, then args.Mode
 		// will never be transparent because the service config request does not use the resolved value.
@@ -145,14 +178,16 @@ func ComputeResolvedServiceConfig(
 	}
 
 	// First store all upstreams that were provided in the request
-	for _, sid := range upstreamIDs {
-		seenUpstreams[sid] = struct{}{}
+	for _, psn := range args.UpstreamServiceNames {
+		if _, ok := seenUpstreams[psn]; !ok {
+			seenUpstreams[psn] = struct{}{}
+		}
 	}
 
 	// Then store upstreams inferred from service-defaults and mapify the overrides.
 	var (
 		upstreamDefaults  *structs.UpstreamConfig
-		upstreamOverrides = make(map[structs.ServiceID]*structs.UpstreamConfig)
+		upstreamOverrides = make(map[structs.PeeredServiceName]*structs.UpstreamConfig)
 	)
 	if serviceConf != nil && serviceConf.UpstreamConfig != nil {
 		for i, override := range serviceConf.UpstreamConfig.Overrides {
@@ -166,8 +201,9 @@ func ComputeResolvedServiceConfig(
 				)
 				continue // skip this impossible condition
 			}
-			seenUpstreams[override.ServiceID()] = struct{}{}
-			upstreamOverrides[override.ServiceID()] = override
+			psn := override.PeeredServiceName()
+			seenUpstreams[psn] = struct{}{}
+			upstreamOverrides[psn] = override
 		}
 		if serviceConf.UpstreamConfig.Defaults != nil {
 			upstreamDefaults = serviceConf.UpstreamConfig.Defaults
@@ -199,13 +235,15 @@ func ComputeResolvedServiceConfig(
 		// 2. Protocol for upstream service defined in its service-defaults (how the upstream wants to be addressed)
 		// 3. Protocol defined for the upstream in the service-defaults.(upstream_config.defaults|upstream_config.overrides) of the downstream
 		// 	  (how the downstream wants to address it)
+		if proxyConfGlobalProtocol != "" {
+			resolvedCfg["protocol"] = proxyConfGlobalProtocol
+		}
+
 		if err := mergo.MergeWithOverwrite(&resolvedCfg, wildcardUpstreamDefaults); err != nil {
 			return nil, fmt.Errorf("failed to merge wildcard defaults into upstream: %v", err)
 		}
 
-		upstreamSvcDefaults := entries.GetServiceDefaults(
-			structs.NewServiceID(upstream.ID, &upstream.EnterpriseMeta),
-		)
+		upstreamSvcDefaults := entries.GetServiceDefaults(upstream.ServiceName.ToServiceID())
 		if upstreamSvcDefaults != nil {
 			if upstreamSvcDefaults.Protocol != "" {
 				resolvedCfg["protocol"] = upstreamSvcDefaults.Protocol
@@ -258,21 +296,11 @@ func ComputeResolvedServiceConfig(
 		return &thisReply, nil
 	}
 
-	if legacyUpstreams {
-		// For legacy upstreams we return a map that is only keyed on the string ID, since they precede namespaces
-		thisReply.UpstreamConfigs = make(map[string]map[string]interface{})
+	thisReply.UpstreamConfigs = make(structs.OpaqueUpstreamConfigs, 0, len(resolvedConfigs))
 
-		for us, conf := range resolvedConfigs {
-			thisReply.UpstreamConfigs[us.ID] = conf
-		}
-
-	} else {
-		thisReply.UpstreamIDConfigs = make(structs.OpaqueUpstreamConfigs, 0, len(resolvedConfigs))
-
-		for us, conf := range resolvedConfigs {
-			thisReply.UpstreamIDConfigs = append(thisReply.UpstreamIDConfigs,
-				structs.OpaqueUpstreamConfig{Upstream: us, Config: conf})
-		}
+	for us, conf := range resolvedConfigs {
+		thisReply.UpstreamConfigs = append(thisReply.UpstreamConfigs,
+			structs.OpaqueUpstreamConfig{Upstream: us, Config: conf})
 	}
 
 	return &thisReply, nil

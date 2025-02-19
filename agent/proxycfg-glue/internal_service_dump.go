@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package proxycfgglue
 
 import (
@@ -78,19 +81,21 @@ func (s *serverInternalServiceDump) Notify(ctx context.Context, req *structs.Ser
 				return 0, nil, err
 			}
 
+			totalNodeLength := len(nodes)
+			aclfilter.New(authz, s.deps.Logger).Filter(&nodes)
+
 			raw, err := filter.Execute(nodes)
 			if err != nil {
 				return 0, nil, fmt.Errorf("could not filter local service dump: %w", err)
 			}
 			nodes = raw.(structs.CheckServiceNodes)
 
-			aclfilter.New(authz, s.deps.Logger).Filter(&nodes)
-
 			return idx, &structs.IndexedCheckServiceNodes{
 				Nodes: nodes,
 				QueryMeta: structs.QueryMeta{
-					Index:   idx,
-					Backend: structs.QueryBackendBlocking,
+					Index:                 idx,
+					Backend:               structs.QueryBackendBlocking,
+					ResultsFilteredByACLs: totalNodeLength != len(nodes),
 				},
 			}, nil
 		},

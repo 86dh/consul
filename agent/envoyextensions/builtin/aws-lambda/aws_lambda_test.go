@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package awslambda
 
 import (
@@ -18,9 +21,9 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	pstruct "google.golang.org/protobuf/types/known/structpb"
 
-	"github.com/hashicorp/consul/agent/envoyextensions/extensioncommon"
 	"github.com/hashicorp/consul/api"
-	"github.com/hashicorp/consul/proto/prototest"
+	"github.com/hashicorp/consul/envoyextensions/extensioncommon"
+	"github.com/hashicorp/consul/proto/private/prototest"
 )
 
 func TestConstructor(t *testing.T) {
@@ -67,7 +70,7 @@ func TestConstructor(t *testing.T) {
 			svc := api.CompoundServiceName{Name: "svc"}
 			ext := extensioncommon.RuntimeConfig{
 				ServiceName: svc,
-				Upstreams: map[api.CompoundServiceName]extensioncommon.UpstreamData{
+				Upstreams: map[api.CompoundServiceName]*extensioncommon.UpstreamData{
 					svc: {OutgoingProxyKind: kind},
 				},
 				EnvoyExtension: api.EnvoyExtension{
@@ -83,7 +86,7 @@ func TestConstructor(t *testing.T) {
 
 			if tc.ok {
 				require.NoError(t, err)
-				require.Equal(t, &extensioncommon.BasicEnvoyExtender{Extension: &tc.expected}, e)
+				require.Equal(t, &extensioncommon.UpstreamEnvoyExtender{Extension: &tc.expected}, e)
 			} else {
 				require.Error(t, err)
 			}
@@ -96,7 +99,7 @@ func TestCanApply(t *testing.T) {
 	require.False(t, a.CanApply(&extensioncommon.RuntimeConfig{
 		Kind:        api.ServiceKindConnectProxy,
 		ServiceName: api.CompoundServiceName{Name: "s1"},
-		Upstreams: map[api.CompoundServiceName]extensioncommon.UpstreamData{
+		Upstreams: map[api.CompoundServiceName]*extensioncommon.UpstreamData{
 			{Name: "s1"}: {
 				OutgoingProxyKind: api.ServiceKindTerminatingGateway,
 			},
@@ -105,7 +108,7 @@ func TestCanApply(t *testing.T) {
 	require.True(t, a.CanApply(&extensioncommon.RuntimeConfig{
 		Kind:        api.ServiceKindConnectProxy,
 		ServiceName: api.CompoundServiceName{Name: "s1"},
-		Upstreams: map[api.CompoundServiceName]extensioncommon.UpstreamData{
+		Upstreams: map[api.CompoundServiceName]*extensioncommon.UpstreamData{
 			{Name: "s1"}: {
 				OutgoingProxyKind: api.ServiceKindConnectProxy,
 			},
@@ -149,7 +152,7 @@ func TestPatchCluster(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			transportSocket, err := makeUpstreamTLSTransportSocket(&envoy_tls_v3.UpstreamTlsContext{
+			transportSocket, err := extensioncommon.MakeUpstreamTLSTransportSocket(&envoy_tls_v3.UpstreamTlsContext{
 				Sni: "*.amazonaws.com",
 			})
 			require.NoError(t, err)
@@ -199,7 +202,10 @@ func TestPatchCluster(t *testing.T) {
 
 			// Test patching the cluster
 			rc := extensioncommon.RuntimeConfig{}
-			patchedCluster, patchSuccess, err := tc.lambda.PatchCluster(&rc, tc.input)
+			patchedCluster, patchSuccess, err := tc.lambda.PatchCluster(extensioncommon.ClusterPayload{
+				RuntimeConfig: &rc,
+				Message:       tc.input,
+			})
 			if tc.isErrExpected {
 				assert.Error(t, err)
 				assert.False(t, patchSuccess)
@@ -304,7 +310,10 @@ func TestPatchRoute(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			l := awsLambda{}
-			r, ok, err := l.PatchRoute(tc.conf, tc.route)
+			r, ok, err := l.PatchRoute(extensioncommon.RoutePayload{
+				RuntimeConfig: tc.conf,
+				Message:       tc.route,
+			})
 			require.NoError(t, err)
 			require.Equal(t, tc.expectRoute, r)
 			require.Equal(t, tc.expectBool, ok)
@@ -320,10 +329,11 @@ func TestPatchFilter(t *testing.T) {
 		return v
 	}
 	tests := map[string]struct {
-		filter       *envoy_listener_v3.Filter
-		expectFilter *envoy_listener_v3.Filter
-		expectBool   bool
-		expectErr    string
+		filter          *envoy_listener_v3.Filter
+		isInboundFilter bool
+		expectFilter    *envoy_listener_v3.Filter
+		expectBool      bool
+		expectErr       string
 	}{
 		"invalid filter name is ignored": {
 			filter:       &envoy_listener_v3.Filter{Name: "something"},
@@ -413,6 +423,36 @@ func TestPatchFilter(t *testing.T) {
 			},
 			expectBool: true,
 		},
+		"inbound filter ignored": {
+			filter: &envoy_listener_v3.Filter{
+				Name: "envoy.filters.network.http_connection_manager",
+				ConfigType: &envoy_listener_v3.Filter_TypedConfig{
+					TypedConfig: makeAny(&envoy_http_v3.HttpConnectionManager{
+						HttpFilters: []*envoy_http_v3.HttpFilter{
+							{Name: "one"},
+							{Name: "two"},
+							{Name: "envoy.filters.http.router"},
+							{Name: "three"},
+						},
+					}),
+				},
+			},
+			expectFilter: &envoy_listener_v3.Filter{
+				Name: "envoy.filters.network.http_connection_manager",
+				ConfigType: &envoy_listener_v3.Filter_TypedConfig{
+					TypedConfig: makeAny(&envoy_http_v3.HttpConnectionManager{
+						HttpFilters: []*envoy_http_v3.HttpFilter{
+							{Name: "one"},
+							{Name: "two"},
+							{Name: "envoy.filters.http.router"},
+							{Name: "three"},
+						},
+					}),
+				},
+			},
+			isInboundFilter: true,
+			expectBool:      false,
+		},
 	}
 
 	for name, tc := range tests {
@@ -422,7 +462,14 @@ func TestPatchFilter(t *testing.T) {
 				PayloadPassthrough: true,
 				InvocationMode:     "asynchronous",
 			}
-			f, ok, err := l.PatchFilter(nil, tc.filter)
+			d := extensioncommon.TrafficDirectionOutbound
+			if tc.isInboundFilter {
+				d = extensioncommon.TrafficDirectionInbound
+			}
+			f, ok, err := l.PatchFilter(extensioncommon.FilterPayload{
+				Message:          tc.filter,
+				TrafficDirection: d,
+			})
 			require.Equal(t, tc.expectBool, ok)
 			if tc.expectErr == "" {
 				require.NoError(t, err)

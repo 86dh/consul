@@ -1,3 +1,8 @@
+{{!
+  Copyright (c) HashiCorp, Inc.
+  SPDX-License-Identifier: BUSL-1.1
+}}
+
 <div
   ...attributes
   class="consul-intention-permission-header-form"
@@ -61,6 +66,19 @@
               {{changeset-get changeset 'error.Value.validation'}}
             </el.Error>
           </State>
+        </group.Element>
+  {{/if}}
+
+  {{#if shouldShowIgnoreCaseField}}
+        <group.Element
+          @name="IgnoreCase"
+          @error={{changeset-get changeset 'error.IgnoreCase'}}
+        as |el|>
+          <el.Label>Ignore Case</el.Label>
+          <el.Checkbox
+            checked={{if IgnoreCase 'checked'}}
+            onchange={{action 'change' 'IgnoreCase' changeset}}
+          />
         </group.Element>
   {{/if}}
 
